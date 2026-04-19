@@ -1,0 +1,672 @@
+// ============================================================================
+// LED MCU Firmware — NeoPixel Ring Animation Engine
+// ============================================================================
+//
+// Target: ATSAMD21E17A (Adafruit Trinket M0 pinout, 128KB flash / 16KB RAM)
+//         Modified Trinket M0 UF2 bootloader (E17A variant) at 0x0000–0x1FFF.
+//         Upload via PlatformIO (bossac/SAM-BA) or drag .uf2 onto UF2 drive.
+//
+// This MCU offloads NeoPixel timing from the main MCU. It runs autonomously,
+// driving LED ring animations and accepting commands over I2C.
+//
+// A USB serial CLI is also available for standalone testing — connect to the
+// LED MCU's USB port and open a terminal at 115200 baud. Type 'help' for
+// available commands.
+//
+// Pin assignments:
+//   D0 (PA08) — I2C SDA (shared bus with main MCU and MCP23017)
+//   D1 (PA02) — NeoPixel data output (level-shifted 3.3V <-> 5V on PCB)
+//   D2 (PA09) — I2C SCL (shared bus with main MCU and MCP23017)
+//
+// I2C slave address: 0x30
+//
+// ============================================================================
+// I2C PROTOCOL
+// ============================================================================
+//
+// The main MCU (master) sends commands via I2C write, then reads the response
+// via I2C read. The LED MCU never initiates communication.
+//
+// --- Command 0x01: SET_ANIMATION ---
+//   Master writes 7 bytes:
+//     [0] 0x01 (command)
+//     [1] ring index (0-based, 0xFF = all rings)
+//     [2] animation (0=off, 1=static, 2=spin, 3=bounce, 4=pulse)
+//     [3] red   (0-255)
+//     [4] green (0-255)
+//     [5] blue  (0-255)
+//     [6] brightness (0-255)
+//   Master reads 1 byte response:
+//     [0] 0xA0=OK, 0xE1=unknown cmd, 0xE2=bad format
+//
+// --- Command 0x02: GET_STATUS ---
+//   Master writes 2 bytes:
+//     [0] 0x02 (command)
+//     [1] ring index (0-based)
+//   Master reads 7 bytes response:
+//     [0] 0xA0=OK (or 0xE2 if bad ring index)
+//     [1] animation type
+//     [2] red
+//     [3] green
+//     [4] blue
+//     [5] brightness
+//     [6] num_rings (from config)
+//
+// --- Command 0x03: SET_CONFIG (persistent, saved to flash) ---
+//   Master writes 4 bytes:
+//     [0] 0x03 (command)
+//     [1] parameter ID (see table below)
+//     [2] value low byte
+//     [3] value high byte (0 for 8-bit params)
+//   Master reads 1 byte response:
+//     [0] 0xA0=OK, 0xE2=bad param
+//
+//   Parameter IDs:
+//     0x01 num_rings      (uint8)   Number of rings on the data line
+//     0x02 leds_per_ring  (uint8)   LEDs per ring
+//     0x03 spin_width     (uint8)   Lit LEDs in spin animation
+//     0x04 bounce_width   (uint8)   Lit LEDs in bounce animation
+//     0x05 spin_speed     (uint16)  Milliseconds per spin step
+//     0x06 bounce_speed   (uint16)  Milliseconds per bounce step
+//     0x07 pulse_speed    (uint16)  Milliseconds per pulse half-cycle
+//
+// --- Command 0x04: GET_CONFIG ---
+//   Master writes 1 byte:
+//     [0] 0x04 (command)
+//   Master reads 11 bytes response:
+//     [0]  0xA0=OK
+//     [1]  num_rings
+//     [2]  leds_per_ring
+//     [3]  spin_width
+//     [4]  bounce_width
+//     [5]  spin_speed low byte
+//     [6]  spin_speed high byte
+//     [7]  bounce_speed low byte
+//     [8]  bounce_speed high byte
+//     [9]  pulse_speed low byte
+//     [10] pulse_speed high byte
+//
+// ============================================================================
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_NeoPixel.h>
+#include <FlashStorage.h>
+
+// ============================================================================
+// Hardware Configuration
+// ============================================================================
+
+static constexpr uint8_t NEOPIXEL_PIN = 1;   // D1 on Trinket M0
+static constexpr uint8_t I2C_ADDR     = 0x30;
+static constexpr uint16_t MAX_LEDS    = 64;  // Maximum supported LEDs
+static constexpr uint8_t MAX_RINGS    = 8;   // Maximum supported rings
+
+// ============================================================================
+// I2C Protocol Constants
+// ============================================================================
+
+static constexpr uint8_t CMD_SET_ANIMATION = 0x01;
+static constexpr uint8_t CMD_GET_STATUS    = 0x02;
+static constexpr uint8_t CMD_SET_CONFIG    = 0x03;
+static constexpr uint8_t CMD_GET_CONFIG    = 0x04;
+
+static constexpr uint8_t RSP_OK      = 0xA0;
+static constexpr uint8_t RSP_BAD_CMD = 0xE1;
+static constexpr uint8_t RSP_BAD_FMT = 0xE2;
+
+static constexpr uint8_t ANIM_OFF    = 0;
+static constexpr uint8_t ANIM_STATIC = 1;
+static constexpr uint8_t ANIM_SPIN   = 2;
+static constexpr uint8_t ANIM_BOUNCE = 3;
+static constexpr uint8_t ANIM_PULSE  = 4;
+
+static constexpr uint8_t CFG_NUM_RINGS     = 0x01;
+static constexpr uint8_t CFG_LEDS_PER_RING = 0x02;
+static constexpr uint8_t CFG_SPIN_WIDTH    = 0x03;
+static constexpr uint8_t CFG_BOUNCE_WIDTH  = 0x04;
+static constexpr uint8_t CFG_SPIN_SPEED    = 0x05;
+static constexpr uint8_t CFG_BOUNCE_SPEED  = 0x06;
+static constexpr uint8_t CFG_PULSE_SPEED   = 0x07;
+
+// ============================================================================
+// Persistent Configuration (saved to flash)
+// ============================================================================
+
+struct Config {
+    bool     valid;
+    uint8_t  numRings;
+    uint8_t  ledsPerRing;
+    uint8_t  spinWidth;
+    uint8_t  bounceWidth;
+    uint16_t spinSpeedMs;
+    uint16_t bounceSpeedMs;
+    uint16_t pulseSpeedMs;
+};
+
+FlashStorage(configStore, Config);
+
+static Config config;
+
+static void loadConfig() {
+    Config stored = configStore.read();
+    if (stored.valid) {
+        config = stored;
+    } else {
+        // Factory defaults
+        config.valid        = true;
+        config.numRings     = 2;
+        config.ledsPerRing  = 12;
+        config.spinWidth    = 1;
+        config.bounceWidth  = 1;
+        config.spinSpeedMs  = 100;
+        config.bounceSpeedMs = 100;
+        config.pulseSpeedMs = 500;
+    }
+}
+
+static void saveConfig() {
+    config.valid = true;
+    configStore.write(config);
+}
+
+static uint16_t totalLeds() {
+    uint16_t n = (uint16_t)config.numRings * config.ledsPerRing;
+    return (n > MAX_LEDS) ? MAX_LEDS : n;
+}
+
+// ============================================================================
+// Per-Ring Animation State
+// ============================================================================
+
+struct RingState {
+    uint8_t  animation;    // ANIM_OFF, ANIM_STATIC, etc.
+    uint8_t  r, g, b;      // Color
+    uint8_t  brightness;   // 0-255
+    int16_t  step;         // Current animation position
+    int8_t   direction;    // Bounce direction: +1 or -1
+    bool     pulseOn;      // Pulse state: on or off
+    uint32_t lastUpdateMs; // Last animation step time
+};
+
+static RingState rings[MAX_RINGS];
+
+// ============================================================================
+// NeoPixel Strip
+// ============================================================================
+
+static Adafruit_NeoPixel strip(MAX_LEDS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+/// Apply per-ring brightness by scaling the color channel.
+static inline uint8_t scale(uint8_t color, uint8_t brightness) {
+    return (uint8_t)(((uint16_t)color * (uint16_t)brightness) / 255);
+}
+
+/// Set a pixel with brightness applied.
+static void setPixelScaled(uint16_t idx, uint8_t r, uint8_t g, uint8_t b,
+                           uint8_t brightness) {
+    strip.setPixelColor(idx, scale(r, brightness), scale(g, brightness),
+                        scale(b, brightness));
+}
+
+// ============================================================================
+// Animation Engine — updates one ring's LED data
+// ============================================================================
+
+static void updateRing(uint8_t ringIdx) {
+    if (ringIdx >= config.numRings) return;
+
+    RingState &rs = rings[ringIdx];
+    uint16_t base = (uint16_t)ringIdx * config.ledsPerRing;
+    uint16_t n    = config.ledsPerRing;
+    uint32_t now  = millis();
+
+    switch (rs.animation) {
+
+    case ANIM_OFF:
+        for (uint16_t i = 0; i < n; i++)
+            strip.setPixelColor(base + i, 0);
+        break;
+
+    case ANIM_STATIC:
+        for (uint16_t i = 0; i < n; i++)
+            setPixelScaled(base + i, rs.r, rs.g, rs.b, rs.brightness);
+        break;
+
+    case ANIM_SPIN:
+        // Advance position on timer tick
+        if (now - rs.lastUpdateMs >= config.spinSpeedMs) {
+            rs.step = (rs.step + 1) % n;
+            rs.lastUpdateMs = now;
+        }
+        // Clear ring, then light the spin window
+        for (uint16_t i = 0; i < n; i++)
+            strip.setPixelColor(base + i, 0);
+        for (uint8_t w = 0; w < config.spinWidth && w < n; w++) {
+            uint16_t pos = ((uint16_t)rs.step + w) % n;
+            setPixelScaled(base + pos, rs.r, rs.g, rs.b, rs.brightness);
+        }
+        break;
+
+    case ANIM_BOUNCE: {
+        if (now - rs.lastUpdateMs >= config.bounceSpeedMs) {
+            rs.step += rs.direction;
+            int16_t maxPos = (int16_t)n - (int16_t)config.bounceWidth;
+            if (maxPos < 0) maxPos = 0;
+            if (rs.step >= maxPos) { rs.step = maxPos; rs.direction = -1; }
+            if (rs.step <= 0)     { rs.step = 0;      rs.direction =  1; }
+            rs.lastUpdateMs = now;
+        }
+        // Clear ring, then light the bounce window
+        for (uint16_t i = 0; i < n; i++)
+            strip.setPixelColor(base + i, 0);
+        for (uint8_t w = 0; w < config.bounceWidth && w < n; w++) {
+            uint16_t pos = (uint16_t)rs.step + w;
+            if (pos < n) setPixelScaled(base + pos, rs.r, rs.g, rs.b, rs.brightness);
+        }
+        break;
+    }
+
+    case ANIM_PULSE:
+        if (now - rs.lastUpdateMs >= config.pulseSpeedMs) {
+            rs.pulseOn = !rs.pulseOn;
+            rs.lastUpdateMs = now;
+        }
+        for (uint16_t i = 0; i < n; i++) {
+            if (rs.pulseOn)
+                setPixelScaled(base + i, rs.r, rs.g, rs.b, rs.brightness);
+            else
+                strip.setPixelColor(base + i, 0);
+        }
+        break;
+
+    default:
+        // Unknown animation — treat as off
+        for (uint16_t i = 0; i < n; i++)
+            strip.setPixelColor(base + i, 0);
+        break;
+    }
+}
+
+// ============================================================================
+// I2C Response Buffer
+// ============================================================================
+
+static uint8_t rspBuf[16];
+static volatile uint8_t rspLen = 0;
+
+// ============================================================================
+// Shared Command Logic (used by both I2C and Serial CLI)
+// ============================================================================
+
+/// Set animation on one or all rings. Returns RSP_OK or RSP_BAD_FMT.
+static uint8_t doSetAnimation(uint8_t ring, uint8_t anim, uint8_t r, uint8_t g,
+                              uint8_t b, uint8_t bri) {
+    if (anim > ANIM_PULSE) return RSP_BAD_FMT;
+
+    uint8_t first = 0, last = config.numRings;
+    if (ring != 0xFF) {
+        if (ring >= config.numRings) return RSP_BAD_FMT;
+        first = ring;
+        last  = ring + 1;
+    }
+
+    for (uint8_t i = first; i < last; i++) {
+        rings[i].animation   = anim;
+        rings[i].r           = r;
+        rings[i].g           = g;
+        rings[i].b           = b;
+        rings[i].brightness  = bri;
+        rings[i].step        = 0;
+        rings[i].direction   = 1;
+        rings[i].pulseOn     = true;
+        rings[i].lastUpdateMs = millis();
+    }
+    return RSP_OK;
+}
+
+/// Set a config parameter and save to flash. Returns RSP_OK or RSP_BAD_FMT.
+static uint8_t doSetConfig(uint8_t paramId, uint16_t value) {
+    switch (paramId) {
+        case CFG_NUM_RINGS:     config.numRings      = (uint8_t)value;  break;
+        case CFG_LEDS_PER_RING: config.ledsPerRing   = (uint8_t)value;  break;
+        case CFG_SPIN_WIDTH:    config.spinWidth      = (uint8_t)value;  break;
+        case CFG_BOUNCE_WIDTH:  config.bounceWidth    = (uint8_t)value;  break;
+        case CFG_SPIN_SPEED:    config.spinSpeedMs    = value;           break;
+        case CFG_BOUNCE_SPEED:  config.bounceSpeedMs  = value;           break;
+        case CFG_PULSE_SPEED:   config.pulseSpeedMs   = value;           break;
+        default: return RSP_BAD_FMT;
+    }
+    saveConfig();
+    strip.updateLength(totalLeds());
+    return RSP_OK;
+}
+
+// ============================================================================
+// I2C Receive Handler (master writes to us)
+// ============================================================================
+
+static void onI2CReceive(int numBytes) {
+    if (numBytes < 1) return;
+
+    uint8_t cmd = Wire.read();
+    numBytes--;
+
+    // Read remaining data bytes into local buffer
+    uint8_t data[8];
+    uint8_t dataLen = 0;
+    while (Wire.available() && dataLen < sizeof(data)) {
+        data[dataLen++] = Wire.read();
+    }
+    while (Wire.available()) Wire.read(); // Drain excess
+
+    switch (cmd) {
+
+    // ----- CMD_SET_ANIMATION (0x01) -----
+    case CMD_SET_ANIMATION: {
+        if (dataLen < 6) { rspBuf[0] = RSP_BAD_FMT; rspLen = 1; return; }
+        rspBuf[0] = doSetAnimation(data[0], data[1], data[2], data[3], data[4], data[5]);
+        rspLen = 1;
+        break;
+    }
+
+    // ----- CMD_GET_STATUS (0x02) -----
+    case CMD_GET_STATUS: {
+        if (dataLen < 1) { rspBuf[0] = RSP_BAD_FMT; rspLen = 1; return; }
+
+        uint8_t ring = data[0];
+        if (ring >= config.numRings) { rspBuf[0] = RSP_BAD_FMT; rspLen = 1; return; }
+
+        rspBuf[0] = RSP_OK;
+        rspBuf[1] = rings[ring].animation;
+        rspBuf[2] = rings[ring].r;
+        rspBuf[3] = rings[ring].g;
+        rspBuf[4] = rings[ring].b;
+        rspBuf[5] = rings[ring].brightness;
+        rspBuf[6] = config.numRings;
+        rspLen = 7;
+        break;
+    }
+
+    // ----- CMD_SET_CONFIG (0x03) -----
+    case CMD_SET_CONFIG: {
+        if (dataLen < 3) { rspBuf[0] = RSP_BAD_FMT; rspLen = 1; return; }
+        uint16_t value = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+        rspBuf[0] = doSetConfig(data[0], value);
+        rspLen = 1;
+        break;
+    }
+
+    // ----- CMD_GET_CONFIG (0x04) -----
+    case CMD_GET_CONFIG: {
+        rspBuf[0]  = RSP_OK;
+        rspBuf[1]  = config.numRings;
+        rspBuf[2]  = config.ledsPerRing;
+        rspBuf[3]  = config.spinWidth;
+        rspBuf[4]  = config.bounceWidth;
+        rspBuf[5]  = (uint8_t)(config.spinSpeedMs  & 0xFF);
+        rspBuf[6]  = (uint8_t)(config.spinSpeedMs  >> 8);
+        rspBuf[7]  = (uint8_t)(config.bounceSpeedMs & 0xFF);
+        rspBuf[8]  = (uint8_t)(config.bounceSpeedMs >> 8);
+        rspBuf[9]  = (uint8_t)(config.pulseSpeedMs  & 0xFF);
+        rspBuf[10] = (uint8_t)(config.pulseSpeedMs  >> 8);
+        rspLen = 11;
+        break;
+    }
+
+    default:
+        rspBuf[0] = RSP_BAD_CMD;
+        rspLen = 1;
+        break;
+    }
+}
+
+// ============================================================================
+// I2C Request Handler (master reads from us)
+// ============================================================================
+
+static void onI2CRequest() {
+    Wire.write(rspBuf, rspLen);
+}
+
+// ============================================================================
+// setup()
+// ============================================================================
+
+void setup() {
+    // USB Serial for testing CLI
+    Serial.begin(115200);
+
+    // Load persistent configuration from flash
+    loadConfig();
+
+    // Initialize NeoPixel strip
+    strip.begin();
+    strip.updateLength(totalLeds());
+    strip.clear();
+    strip.show();
+
+    // Initialize all ring states to OFF
+    for (uint8_t i = 0; i < MAX_RINGS; i++) {
+        memset(&rings[i], 0, sizeof(RingState));
+        rings[i].direction = 1;
+    }
+
+    // Start I2C slave
+    Wire.begin(I2C_ADDR);
+    Wire.onReceive(onI2CReceive);
+    Wire.onRequest(onI2CRequest);
+}
+
+// ============================================================================
+// Serial CLI — USB serial test interface
+// ============================================================================
+
+static char cmdBuf[80];
+static uint8_t cmdPos = 0;
+
+static const char *animName(uint8_t anim) {
+    switch (anim) {
+        case ANIM_OFF:    return "off";
+        case ANIM_STATIC: return "static";
+        case ANIM_SPIN:   return "spin";
+        case ANIM_BOUNCE: return "bounce";
+        case ANIM_PULSE:  return "pulse";
+        default:          return "?";
+    }
+}
+
+static uint8_t parseAnim(const char *s) {
+    if (strcasecmp(s, "off")    == 0) return ANIM_OFF;
+    if (strcasecmp(s, "static") == 0) return ANIM_STATIC;
+    if (strcasecmp(s, "spin")   == 0) return ANIM_SPIN;
+    if (strcasecmp(s, "bounce") == 0) return ANIM_BOUNCE;
+    if (strcasecmp(s, "pulse")  == 0) return ANIM_PULSE;
+    return 0xFF;
+}
+
+static void printHelp() {
+    Serial.println(F(
+        "\n--- LED MCU Test CLI ---\n"
+        "  set <ring|all> <off|static|spin|bounce|pulse> <r> <g> <b> <brightness>\n"
+        "  status [ring]         Show ring state (all if no arg)\n"
+        "  config <param> <val>  Set config (num_rings, leds_per_ring, spin_width,\n"
+        "                        bounce_width, spin_speed, bounce_speed, pulse_speed)\n"
+        "  getconfig             Show all config\n"
+        "  off                   All LEDs off\n"
+        "  info                  Firmware and hardware info\n"
+        "  help                  This message\n"
+    ));
+}
+
+static void processCommand(char *line) {
+    // Tokenize
+    char *tokens[8];
+    uint8_t n = 0;
+    char *tok = strtok(line, " \t");
+    while (tok && n < 8) {
+        tokens[n++] = tok;
+        tok = strtok(nullptr, " \t");
+    }
+    if (n == 0) return;
+
+    // --- help ---
+    if (strcasecmp(tokens[0], "help") == 0) {
+        printHelp();
+    }
+
+    // --- info ---
+    else if (strcasecmp(tokens[0], "info") == 0) {
+        Serial.println(F("[INFO] LED MCU — ATSAMD21E17A (Trinket M0 pinout)"));
+        Serial.print(F("[INFO] I2C slave address: 0x"));
+        Serial.println(I2C_ADDR, HEX);
+        Serial.print(F("[INFO] NeoPixel pin: D"));
+        Serial.println(NEOPIXEL_PIN);
+        Serial.print(F("[INFO] Total LEDs: "));
+        Serial.println(totalLeds());
+        Serial.print(F("[INFO] Uptime: "));
+        Serial.print(millis() / 1000);
+        Serial.println(F("s"));
+    }
+
+    // --- off ---
+    else if (strcasecmp(tokens[0], "off") == 0) {
+        doSetAnimation(0xFF, ANIM_OFF, 0, 0, 0, 0);
+        Serial.println(F("[LED] All rings OFF."));
+    }
+
+    // --- set <ring|all> <anim> <r> <g> <b> <brightness> ---
+    else if (strcasecmp(tokens[0], "set") == 0) {
+        if (n < 7) {
+            Serial.println(F("[ERROR] Usage: set <ring|all> <anim> <r> <g> <b> <brightness>"));
+            return;
+        }
+        uint8_t ring;
+        if (strcasecmp(tokens[1], "all") == 0) ring = 0xFF;
+        else ring = (uint8_t)atoi(tokens[1]);
+
+        uint8_t anim = parseAnim(tokens[2]);
+        if (anim == 0xFF) {
+            Serial.println(F("[ERROR] Anim must be: off, static, spin, bounce, pulse"));
+            return;
+        }
+
+        uint8_t r   = (uint8_t)atoi(tokens[3]);
+        uint8_t g   = (uint8_t)atoi(tokens[4]);
+        uint8_t b   = (uint8_t)atoi(tokens[5]);
+        uint8_t bri = (uint8_t)atoi(tokens[6]);
+
+        uint8_t res = doSetAnimation(ring, anim, r, g, b, bri);
+        if (res == RSP_OK) {
+            Serial.print(F("[LED] Set ring="));
+            Serial.print(ring == 0xFF ? "all" : tokens[1]);
+            Serial.print(F(" anim=")); Serial.print(animName(anim));
+            Serial.print(F(" color=(")); Serial.print(r);
+            Serial.print(F(",")); Serial.print(g);
+            Serial.print(F(",")); Serial.print(b);
+            Serial.print(F(") bri=")); Serial.println(bri);
+        } else {
+            Serial.println(F("[ERROR] Invalid ring or animation."));
+        }
+    }
+
+    // --- status [ring] ---
+    else if (strcasecmp(tokens[0], "status") == 0) {
+        uint8_t first = 0, last = config.numRings;
+        if (n >= 2) {
+            first = (uint8_t)atoi(tokens[1]);
+            last  = first + 1;
+        }
+        for (uint8_t i = first; i < last && i < config.numRings; i++) {
+            Serial.print(F("[RING ")); Serial.print(i); Serial.print(F("] "));
+            Serial.print(F("anim=")); Serial.print(animName(rings[i].animation));
+            Serial.print(F(" color=(")); Serial.print(rings[i].r);
+            Serial.print(F(",")); Serial.print(rings[i].g);
+            Serial.print(F(",")); Serial.print(rings[i].b);
+            Serial.print(F(") bri=")); Serial.print(rings[i].brightness);
+            Serial.print(F(" step=")); Serial.println(rings[i].step);
+        }
+        if (first >= config.numRings) {
+            Serial.print(F("[ERROR] Ring ")); Serial.print(first);
+            Serial.print(F(" out of range (0-")); Serial.print(config.numRings - 1);
+            Serial.println(F(")."));
+        }
+    }
+
+    // --- config <param> <value> ---
+    else if (strcasecmp(tokens[0], "config") == 0) {
+        if (n < 3) {
+            Serial.println(F("[ERROR] Usage: config <param> <value>"));
+            return;
+        }
+        uint8_t paramId = 0;
+        if      (strcasecmp(tokens[1], "num_rings")     == 0) paramId = CFG_NUM_RINGS;
+        else if (strcasecmp(tokens[1], "leds_per_ring") == 0) paramId = CFG_LEDS_PER_RING;
+        else if (strcasecmp(tokens[1], "spin_width")    == 0) paramId = CFG_SPIN_WIDTH;
+        else if (strcasecmp(tokens[1], "bounce_width")  == 0) paramId = CFG_BOUNCE_WIDTH;
+        else if (strcasecmp(tokens[1], "spin_speed")    == 0) paramId = CFG_SPIN_SPEED;
+        else if (strcasecmp(tokens[1], "bounce_speed")  == 0) paramId = CFG_BOUNCE_SPEED;
+        else if (strcasecmp(tokens[1], "pulse_speed")   == 0) paramId = CFG_PULSE_SPEED;
+        else {
+            Serial.println(F("[ERROR] Unknown param."));
+            return;
+        }
+        uint16_t value = (uint16_t)atoi(tokens[2]);
+        uint8_t res = doSetConfig(paramId, value);
+        if (res == RSP_OK) {
+            Serial.print(F("[CONFIG] ")); Serial.print(tokens[1]);
+            Serial.print(F(" = ")); Serial.println(value);
+        } else {
+            Serial.println(F("[ERROR] Failed to set config."));
+        }
+    }
+
+    // --- getconfig ---
+    else if (strcasecmp(tokens[0], "getconfig") == 0) {
+        Serial.println(F("[CONFIG] Current configuration:"));
+        Serial.print(F("  num_rings:     ")); Serial.println(config.numRings);
+        Serial.print(F("  leds_per_ring: ")); Serial.println(config.ledsPerRing);
+        Serial.print(F("  spin_width:    ")); Serial.println(config.spinWidth);
+        Serial.print(F("  bounce_width:  ")); Serial.println(config.bounceWidth);
+        Serial.print(F("  spin_speed:    ")); Serial.print(config.spinSpeedMs);   Serial.println(F(" ms"));
+        Serial.print(F("  bounce_speed:  ")); Serial.print(config.bounceSpeedMs); Serial.println(F(" ms"));
+        Serial.print(F("  pulse_speed:   ")); Serial.print(config.pulseSpeedMs);  Serial.println(F(" ms"));
+    }
+
+    else {
+        Serial.print(F("[ERROR] Unknown command: ")); Serial.println(tokens[0]);
+        Serial.println(F("Type 'help' for available commands."));
+    }
+}
+
+// ============================================================================
+// loop() — animation engine + serial CLI
+// ============================================================================
+
+void loop() {
+    // --- Animation engine (rate-limited to ~100 fps) ---
+    static uint32_t lastShow = 0;
+    uint32_t now = millis();
+
+    if (now - lastShow >= 10) {
+        for (uint8_t i = 0; i < config.numRings; i++) {
+            updateRing(i);
+        }
+        strip.show();
+        lastShow = now;
+    }
+
+    // --- Serial CLI ---
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n' || c == '\r') {
+            if (cmdPos > 0) {
+                cmdBuf[cmdPos] = '\0';
+                processCommand(cmdBuf);
+                cmdPos = 0;
+            }
+        } else if (cmdPos < sizeof(cmdBuf) - 1) {
+            cmdBuf[cmdPos++] = c;
+        }
+    }
+}
