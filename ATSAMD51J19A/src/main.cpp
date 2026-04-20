@@ -1,38 +1,51 @@
 // ============================================================================
-// Motor & Sensor Test CLI for Adafruit Metro M4 Express
+// BSU v4 — Motor, Sensor, Drawer & Solenoid Test CLI
+// Target: Adafruit Metro M4 Express (ATSAMD51J19A)
 // ============================================================================
 //
 // Provides a Serial CLI (115200 baud over USB) for interactively testing:
-//   - 4x TMC2209 stepper motor drivers (X, Y, Z1, Z2)
-//   - MCP23017 I/O expander (limit switches + TMC2209 DIAG pins)
+//   - 3x TMC2209 stepper motor drivers (Z1, Z2, M3)
+//   - TMC429 motion controller (SPI on SERCOM4)
+//   - 2x MCP23017 I/O expanders
+//       - EXTRA_IO_EXPANDER @ 0x21 : motor enables, DIAG pins, Z/spare end
+//         switches, drawer-handle button
+//       - TRAY_IO_EXPANDER  @ 0x20 : 12 solenoid outputs + tray signals
+//   - Drawer-handle bi-color LED via DRV8231A H-bridge on D10/D11
+//   - LED MCU (I2C slave at 0x30) — unchanged from PSU
 //
 // Physical motor mapping:
-//   X  — independent axis (own STEP, DIR, ENABLE, UART)
-//   Y  — independent axis (own STEP, DIR, ENABLE, UART)
-//   Z1 — shares STEP/DIR/ENABLE with Z2, but has own UART
-//   Z2 — shares STEP/DIR/ENABLE with Z1, but has own UART
+//   Z1 — independent axis (own STEP, DIR, UART; nEN via EXTRA_IO_EXPANDER)
+//   Z2 — independent axis (own STEP, DIR, UART; nEN via EXTRA_IO_EXPANDER)
+//   M3 — independent axis (own STEP, DIR, UART; nEN via EXTRA_IO_EXPANDER)
+//
+// TMC429 channel mapping:
+//   z1 -> TMC429 motor 0 (M1 pads)  — uses Z_TOP/Z_BOT switches (shared)
+//   z2 -> TMC429 motor 1 (M2 pads)  — uses Z_TOP/Z_BOT switches (shared)
+//   m3 -> TMC429 motor 2 (M3 pads)  — uses SPARE_TOP/SPARE_BOT switches
 //
 // UART wiring note:
-//   Each TMC2209 uses a single-wire UART interface. The MCU TX is connected
-//   through a 1k resistor to the TMC2209 PDN_UART pin, and the MCU RX is
-//   connected directly to the same line. This causes TX echoes on RX, which
-//   the janelia-arduino/TMC2209 library handles internally.
+//   Each TMC2209 uses a single-wire UART. The MCU TX is connected through a
+//   1k resistor to the TMC2209 PDN_UART pin, and MCU RX is connected directly
+//   to the same line. The janelia-arduino/TMC2209 library handles the echo.
 //
 // SERCOM assignments (Metro M4 / ATSAMD51J19A):
-//   X  UART -> SERCOM4  (TX=D7/PB12 PAD[0], RX=D4/PB13 PAD[1])
-//   Y  UART -> SERCOM3  (TX=D1/PA22 PAD[0], RX=D0/PA23 PAD[1])  = Serial1
 //   Z1 UART -> SERCOM1  (TX=D13/PA16 PAD[0], RX=D12/PA17 PAD[1])
 //   Z2 UART -> SERCOM5  (TX=D3/PB16 PAD[0], RX=D2/PB17 PAD[1])
+//   M3 UART -> SERCOM3  (TX=D1/PA22 PAD[0], RX=D0/PA23 PAD[1])  = Serial1
+//   MC SPI  -> SERCOM4  (MOSI=D7/PB12 PAD[0], SCK=D4/PB13 PAD[1], MISO=D5/PB14 PAD[2])
 //
 // SERCOM5 CONFLICT NOTE:
-//   The Metro M4 board support package assigns SERCOM5 to Wire (I2C) on the
-//   SDA/SCL header pins (PB2/PB3). The Z2 motor UART also needs SERCOM5 on
-//   different physical pins (PB16/PB17). Since a SERCOM can only operate in
-//   one mode at a time, and the Wire library's interrupt handlers are non-weak
-//   symbols that cannot be overridden, this firmware uses a bitbang I2C
-//   implementation (SoftI2C) for the MCP23017. This frees SERCOM5 entirely
-//   for the Z2 UART. The MCP23017 is only used for low-speed input reads,
-//   so bitbang I2C at ~100 kHz is perfectly adequate.
+//   The Metro M4 BSP assigns SERCOM5 to Wire (I2C) on SDA/SCL (PB2/PB3).
+//   The Z2 motor UART also needs SERCOM5 on PB16/PB17. Since a SERCOM can
+//   only operate in one mode at a time, and Wire's ISR symbols are strong,
+//   we use bitbang I2C (SoftI2C) for the MCP23017s. That frees SERCOM5 for
+//   the Z2 UART. ~100 kHz bitbang is more than adequate for IO expanders.
+//
+// SERCOM4 / TMC429 SPI:
+//   The janelia-arduino/TMC429 library hardcodes use of the global `SPI`
+//   object. We derive TMC429Custom from TMC429, overriding the protected
+//   virtual spiBegin/spiBeginTransaction/spiEndTransaction/spiTransfer
+//   methods to use our SERCOM4 SPI instance (SPI_MC) instead.
 //
 // ============================================================================
 
@@ -48,64 +61,101 @@
 // ============================================================================
 
 // Motor STEP and DIR pins (active-high step pulse, direction level)
-static constexpr uint8_t PIN_X_DIR  = A0;
-static constexpr uint8_t PIN_X_STEP = A1;
-static constexpr uint8_t PIN_Y_DIR  = A2;
-static constexpr uint8_t PIN_Y_STEP = A3;
-static constexpr uint8_t PIN_Z_DIR  = A4;  // Shared by Z1 and Z2
-static constexpr uint8_t PIN_Z_STEP = A5;  // Shared by Z1 and Z2
+static constexpr uint8_t PIN_Z1_DIR  = A0;
+static constexpr uint8_t PIN_Z1_STEP = A1;
+static constexpr uint8_t PIN_Z2_DIR  = A2;
+static constexpr uint8_t PIN_Z2_STEP = A3;
+static constexpr uint8_t PIN_M3_DIR  = A4;
+static constexpr uint8_t PIN_M3_STEP = A5;
 
-// Motor driver nEnable pins (active LOW: LOW = enabled, HIGH = disabled)
-static constexpr uint8_t PIN_X_NENABLE = 10;
-static constexpr uint8_t PIN_Y_NENABLE = 9;
-static constexpr uint8_t PIN_Z_NENABLE = 8;  // Shared by Z1 and Z2
+// I/O expander nRESET (shared by both MCP23017s via a hardware wire-OR /
+// common reset net on the PCB). Active LOW, externally pulled HIGH.
+static constexpr uint8_t PIN_IO_NRESET = 8;
 
-// I/O expander nRESET (active LOW, externally pulled HIGH through 10k)
-static constexpr uint8_t PIN_IO_NRESET = 6;
+// TMC429 motion controller SPI chip select (active LOW, plain GPIO)
+static constexpr uint8_t PIN_MC_NCS = 6;
 
-// TMC429 motion controller SPI chip select (active LOW)
-// SPI bus uses default Metro M4 SPI pins: MOSI, MISO, SCK (SERCOM2)
-static constexpr uint8_t PIN_MC_NCS = 5;
+// TMC429 SPI on SERCOM4
+static constexpr uint8_t PIN_MC_MOSI = 7;  // PB12 SERCOM4 PAD[0]
+static constexpr uint8_t PIN_MC_SCK  = 4;  // PB13 SERCOM4 PAD[1]
+static constexpr uint8_t PIN_MC_MISO = 5;  // PB14 SERCOM4 PAD[2]
+
+// Drawer handle: bi-color LED via DRV8231A H-bridge.
+// The PCB has a hardware AND-gate interlock that prevents both inputs being
+// HIGH simultaneously (which would otherwise active-brake and short the LED).
+//   IN1=1, IN2=0 -> RED
+//   IN1=0, IN2=1 -> GREEN
+//   IN1=0, IN2=0 -> OFF (coast)
+static constexpr uint8_t PIN_DRAWER_LED_IN1 = 10;
+static constexpr uint8_t PIN_DRAWER_LED_IN2 = 11;
 
 // I2C pins (driven by SoftI2C, NOT the Wire library)
 static constexpr uint8_t PIN_I2C_SDA = SDA; // PB2 on Metro M4
 static constexpr uint8_t PIN_I2C_SCL = SCL; // PB3 on Metro M4
 
 // UART pins (Uart objects manage these; listed for documentation)
-static constexpr uint8_t PIN_X_UART_TX  = 7;   // PB12 SERCOM4 PAD[0]
-static constexpr uint8_t PIN_X_UART_RX  = 4;   // PB13 SERCOM4 PAD[1]
-// Y uses Serial1: TX=D1 (PA22 SERCOM3 PAD[0]), RX=D0 (PA23 SERCOM3 PAD[1])
 static constexpr uint8_t PIN_Z1_UART_TX = 13;  // PA16 SERCOM1 PAD[0]
 static constexpr uint8_t PIN_Z1_UART_RX = 12;  // PA17 SERCOM1 PAD[1]
 static constexpr uint8_t PIN_Z2_UART_TX = 3;   // PB16 SERCOM5 PAD[0]
 static constexpr uint8_t PIN_Z2_UART_RX = 2;   // PB17 SERCOM5 PAD[1]
+// M3 uses Serial1: TX=D1 (PA22 SERCOM3 PAD[0]), RX=D0 (PA23 SERCOM3 PAD[1])
 
 // ============================================================================
 // MCP23017 I/O Expander Configuration
 // ============================================================================
 
-// I2C address: A2=A1=A0=GND -> base address 0x20
-static constexpr uint8_t IO_EXPANDER_ADDR = 0x20;
+// I2C addresses
+static constexpr uint8_t TRAY_IO_EXPANDER_ADDR  = 0x20; // A2=A1=A0=GND
+static constexpr uint8_t EXTRA_IO_EXPANDER_ADDR = 0x21; // A0=VDD (others GND)
 
 // MCP23017 register addresses (IOCON.BANK=0, the power-on default)
-static constexpr uint8_t MCP_REG_IODIRA = 0x00; // Port A direction (1=input)
-static constexpr uint8_t MCP_REG_IODIRB = 0x01; // Port B direction (1=input)
-static constexpr uint8_t MCP_REG_GPIOA  = 0x12; // Port A input values
-static constexpr uint8_t MCP_REG_GPIOB  = 0x13; // Port B input values
+static constexpr uint8_t MCP_REG_IODIRA = 0x00;
+static constexpr uint8_t MCP_REG_IODIRB = 0x01;
+static constexpr uint8_t MCP_REG_GPIOA  = 0x12;
+static constexpr uint8_t MCP_REG_GPIOB  = 0x13;
+static constexpr uint8_t MCP_REG_OLATA  = 0x14;
+static constexpr uint8_t MCP_REG_OLATB  = 0x15;
 
-// GPA bit positions within GPIOA register
-static constexpr uint8_t BIT_X_DIAG  = 0; // GPA0
-static constexpr uint8_t BIT_Y_DIAG  = 1; // GPA1
-static constexpr uint8_t BIT_Z1_DIAG = 2; // GPA2
-static constexpr uint8_t BIT_Z2_DIAG = 3; // GPA3
+// --- EXTRA_IO_EXPANDER (0x21) bit layout ---
+// GPA: inputs (DIAG pins) + outputs (motor enables) + drawer button
+static constexpr uint8_t BIT_Z1_DIAG     = 0; // GPA0  (input)
+static constexpr uint8_t BIT_Z2_DIAG     = 1; // GPA1  (input)
+static constexpr uint8_t BIT_M3_DIAG     = 2; // GPA2  (input)
+static constexpr uint8_t BIT_Z1_NEN      = 4; // GPA4  (output, HIGH = disabled)
+static constexpr uint8_t BIT_Z2_NEN      = 5; // GPA5  (output, HIGH = disabled)
+static constexpr uint8_t BIT_M3_NEN      = 6; // GPA6  (output, HIGH = disabled)
+static constexpr uint8_t BIT_DRAWER_BTN  = 7; // GPA7  (input)
+// GPB: limit switches (all inputs, active HIGH per PCB pull-up scheme)
+static constexpr uint8_t BIT_Z_TOP       = 0; // GPB0  (shared by Z1 and Z2)
+static constexpr uint8_t BIT_Z_BOT       = 1; // GPB1  (shared by Z1 and Z2)
+static constexpr uint8_t BIT_SPARE_TOP   = 2; // GPB2  (M3 top)
+static constexpr uint8_t BIT_SPARE_BOT   = 3; // GPB3  (M3 bottom)
 
-// GPB bit positions within GPIOB register
-static constexpr uint8_t BIT_X_END1  = 2; // GPB2
-static constexpr uint8_t BIT_X_END2  = 3; // GPB3
-static constexpr uint8_t BIT_Y_END1  = 4; // GPB4
-static constexpr uint8_t BIT_Y_END2  = 5; // GPB5
-static constexpr uint8_t BIT_Z_END1  = 6; // GPB6
-static constexpr uint8_t BIT_Z_END2  = 7; // GPB7
+// Port A direction mask: 1 = input, 0 = output.
+// DIAGs (bits 0..2) + drawer button (bit 7) are inputs; GPA3 is unused (input);
+// motor nENs (bits 4..6) are outputs.
+static constexpr uint8_t EXTRA_IODIRA = 0b10001111;
+// Port B: all inputs (switches)
+static constexpr uint8_t EXTRA_IODIRB = 0xFF;
+
+// Safe initial OLATA: motor nENs HIGH (disabled); unused bits 0 (harmless).
+static constexpr uint8_t EXTRA_OLATA_SAFE =
+    (1 << BIT_Z1_NEN) | (1 << BIT_Z2_NEN) | (1 << BIT_M3_NEN);
+
+// --- TRAY_IO_EXPANDER (0x20) bit layout ---
+// 12 solenoid outputs:
+//   GPA0..GPA7 = SOL0..SOL7
+//   GPB0..GPB3 = SOL8..SOL11
+//   GPB4..GPB7 = reserved (unused; configured as inputs)
+static constexpr uint8_t TRAY_IODIRA = 0x00; // GPA all outputs (SOL0..SOL7)
+static constexpr uint8_t TRAY_IODIRB = 0xF0; // GPB0..GPB3 outputs; GPB4..GPB7 inputs
+
+// Solenoids are driven HIGH to fire. Default all OFF (0).
+static constexpr uint8_t TRAY_OLATA_SAFE = 0x00;
+static constexpr uint8_t TRAY_OLATB_SAFE = 0x00;
+
+// Number of solenoids exposed
+static constexpr uint8_t NUM_SOLENOIDS = 12;
 
 // ============================================================================
 // LED MCU I2C Protocol Constants
@@ -120,7 +170,7 @@ static constexpr uint8_t LED_CMD_GET_CONFIG = 0x04;
 // Response codes
 static constexpr uint8_t LED_RSP_OK         = 0xA0;
 static constexpr uint8_t LED_RSP_BAD_CMD    = 0xE1;
-static constexpr uint8_t LED_RSP_BAD_FMT   = 0xE2;
+static constexpr uint8_t LED_RSP_BAD_FMT    = 0xE2;
 // Animation types
 static constexpr uint8_t LED_ANIM_OFF       = 0;
 static constexpr uint8_t LED_ANIM_STATIC    = 1;
@@ -140,15 +190,9 @@ static constexpr uint8_t LED_CFG_PULSE_SPEED   = 0x07;
 // Custom SERCOM UART Instances
 // ============================================================================
 //
-// Y Motor uses Serial1 (SERCOM3, TX=D1/PA22, RX=D0/PA23) from the BSP.
-//
-// X, Z1, Z2 need custom Uart objects. We exclude Wire (lib_ignore in
-// platformio.ini) to free SERCOM5's interrupt handlers for Z2.
-
-// X Motor UART: SERCOM4 (TX=PB12/PAD[0], RX=PB13/PAD[1])
-static Uart XMotorSerial(&sercom4,
-                          PIN_X_UART_RX, PIN_X_UART_TX,
-                          SERCOM_RX_PAD_1, UART_TX_PAD_0);
+// M3 Motor uses Serial1 (SERCOM3, TX=D1/PA22, RX=D0/PA23) from the BSP.
+// Z1, Z2 need custom Uart objects. Wire is lib_ignored in platformio.ini so
+// SERCOM5's interrupt handlers are free for Z2.
 
 // Z1 Motor UART: SERCOM1 (TX=PA16/PAD[0], RX=PA17/PAD[1])
 static Uart Z1MotorSerial(&sercom1,
@@ -163,15 +207,12 @@ static Uart Z2MotorSerial(&sercom5,
 // --- SERCOM interrupt handlers -----------------------------------------------
 // SAMD51 has 4 interrupt vectors per SERCOM.
 // SERCOM3 handlers are provided by the BSP for Serial1 — do NOT redefine.
+// SERCOM4 is used for the TMC429 SPI master; SPI master mode typically runs
+// blocking without interrupts, so we do not define SERCOM4 handlers here.
 // SERCOM5 handlers are normally provided by Wire.cpp, but we excluded Wire
 // via lib_ignore so we can define them here for Z2 UART.
 
 extern "C" {
-
-void SERCOM4_0_Handler() { XMotorSerial.IrqHandler(); }
-void SERCOM4_1_Handler() { XMotorSerial.IrqHandler(); }
-void SERCOM4_2_Handler() { XMotorSerial.IrqHandler(); }
-void SERCOM4_3_Handler() { XMotorSerial.IrqHandler(); }
 
 void SERCOM1_0_Handler() { Z1MotorSerial.IrqHandler(); }
 void SERCOM1_1_Handler() { Z1MotorSerial.IrqHandler(); }
@@ -186,33 +227,61 @@ void SERCOM5_3_Handler() { Z2MotorSerial.IrqHandler(); }
 } // extern "C"
 
 // ============================================================================
+// Custom SPI on SERCOM4 for TMC429
+// ============================================================================
+
+// MOSI=PB12 (PAD0), SCK=PB13 (PAD1), MISO=PB14 (PAD2)
+// DOPO: MOSI on PAD0, SCK on PAD1 -> SPI_PAD_0_SCK_1
+// DIPO: MISO on PAD2              -> SERCOM_RX_PAD_2
+static SPIClass SPI_MC(&sercom4,
+                        PIN_MC_MISO, PIN_MC_SCK, PIN_MC_MOSI,
+                        SPI_PAD_0_SCK_1, SERCOM_RX_PAD_2);
+
+// Override TMC429 library's SPI hook methods to use SPI_MC.
+class TMC429Custom : public TMC429 {
+public:
+    TMC429Custom(SPIClass &spi) : _spi(spi) {}
+protected:
+    void spiBegin() override { _spi.begin(); }
+    void spiBeginTransaction(SPISettings s) override { _spi.beginTransaction(s); }
+    void spiEndTransaction() override { _spi.endTransaction(); }
+    uint8_t spiTransfer(uint8_t b) override { return _spi.transfer(b); }
+private:
+    SPIClass &_spi;
+};
+
+// ============================================================================
 // TMC2209 Driver Instances
 // ============================================================================
 
-static TMC2209 tmcX;
-static TMC2209 tmcY;
 static TMC2209 tmcZ1;
 static TMC2209 tmcZ2;
+static TMC2209 tmcM3;
 
-static bool tmcXInitialized  = false;
-static bool tmcYInitialized  = false;
 static bool tmcZ1Initialized = false;
 static bool tmcZ2Initialized = false;
+static bool tmcM3Initialized = false;
 
 // ============================================================================
 // TMC429 Motion Controller Instance
 // ============================================================================
-// Motor index mapping: X=0 (M1), Y=1 (M2), Z=2 (M3)
+// CLI mapping: z1=0 (M1), z2=1 (M2), m3=2 (M3)
 
-static TMC429 motionController;
+static TMC429Custom motionController(SPI_MC);
 static bool mcInitialized = false;
 
 // ============================================================================
-// I2C and I/O Expander
+// I2C and I/O Expanders
 // ============================================================================
 
 static SoftI2C i2c(PIN_I2C_SDA, PIN_I2C_SCL);
-static bool ioExpanderInitialized = false;
+static bool ioExpanderExtraInit = false;
+static bool ioExpanderTrayInit  = false;
+
+// Cached OLAT values so we can update a single bit without a read-modify-write.
+static uint8_t extraOlatA = EXTRA_OLATA_SAFE;
+static uint8_t trayOlatA  = TRAY_OLATA_SAFE;
+static uint8_t trayOlatB  = TRAY_OLATB_SAFE;
 
 // ============================================================================
 // CLI Infrastructure
@@ -269,10 +338,18 @@ static void cmdLedSet(char *tokens[], size_t count);
 static void cmdLedStatus(const char *ringStr);
 static void cmdLedConfig(const char *param, const char *valStr);
 static void cmdLedGetconfig();
+// Drawer-handle commands
+static void cmdDrawerLed(const char *color);
+static void cmdDrawerButton();
+// Solenoid commands
+static void cmdSolenoid(const char *indexStr, const char *state);
+static void cmdSolenoidAll(const char *state);
+// Lookup helpers
 static TMC2209 *lookupTmc(const char *motor);
 static bool     isTmcInitialized(const char *motor);
 static void     getAxisPins(const char *axis, uint8_t &stepPin, uint8_t &dirPin,
-                            uint8_t &enablePin, bool &valid);
+                            bool &valid);
+static int      enableBitForAxis(const char *axis); // returns EXTRA GPA bit or -1
 
 // ============================================================================
 // setup()
@@ -284,33 +361,36 @@ void setup() {
 
     Serial.println();
     Serial.println(F("============================================================"));
-    Serial.println(F("  Motor & Sensor Test CLI"));
+    Serial.println(F("  BSU v4 — Motor, Sensor, Drawer & Solenoid Test CLI"));
     Serial.println(F("  Board: Adafruit Metro M4 Express (ATSAMD51J19A)"));
     Serial.println(F("============================================================"));
 
     // Motor STEP pins (default LOW)
-    pinMode(PIN_X_STEP, OUTPUT); digitalWrite(PIN_X_STEP, LOW);
-    pinMode(PIN_Y_STEP, OUTPUT); digitalWrite(PIN_Y_STEP, LOW);
-    pinMode(PIN_Z_STEP, OUTPUT); digitalWrite(PIN_Z_STEP, LOW);
+    pinMode(PIN_Z1_STEP, OUTPUT); digitalWrite(PIN_Z1_STEP, LOW);
+    pinMode(PIN_Z2_STEP, OUTPUT); digitalWrite(PIN_Z2_STEP, LOW);
+    pinMode(PIN_M3_STEP, OUTPUT); digitalWrite(PIN_M3_STEP, LOW);
 
     // Motor DIR pins (default LOW)
-    pinMode(PIN_X_DIR, OUTPUT); digitalWrite(PIN_X_DIR, LOW);
-    pinMode(PIN_Y_DIR, OUTPUT); digitalWrite(PIN_Y_DIR, LOW);
-    pinMode(PIN_Z_DIR, OUTPUT); digitalWrite(PIN_Z_DIR, LOW);
+    pinMode(PIN_Z1_DIR, OUTPUT); digitalWrite(PIN_Z1_DIR, LOW);
+    pinMode(PIN_Z2_DIR, OUTPUT); digitalWrite(PIN_Z2_DIR, LOW);
+    pinMode(PIN_M3_DIR, OUTPUT); digitalWrite(PIN_M3_DIR, LOW);
 
-    // Motor nEnable pins: HIGH = disabled (safe default)
-    pinMode(PIN_X_NENABLE, OUTPUT); digitalWrite(PIN_X_NENABLE, HIGH);
-    pinMode(PIN_Y_NENABLE, OUTPUT); digitalWrite(PIN_Y_NENABLE, HIGH);
-    pinMode(PIN_Z_NENABLE, OUTPUT); digitalWrite(PIN_Z_NENABLE, HIGH);
+    // Drawer LED H-bridge inputs default LOW (LED off)
+    pinMode(PIN_DRAWER_LED_IN1, OUTPUT); digitalWrite(PIN_DRAWER_LED_IN1, LOW);
+    pinMode(PIN_DRAWER_LED_IN2, OUTPUT); digitalWrite(PIN_DRAWER_LED_IN2, LOW);
 
     // I/O expander nRESET: start as input (external pull-up keeps it HIGH)
     pinMode(PIN_IO_NRESET, INPUT);
 
+    // TMC429 chip select HIGH (inactive) before SPI configured
+    pinMode(PIN_MC_NCS, OUTPUT); digitalWrite(PIN_MC_NCS, HIGH);
+
     Serial.println(F("[BOOT] GPIO pins configured."));
     Serial.println(F("[BOOT]   STEP/DIR pins: LOW"));
-    Serial.println(F("[BOOT]   nEnable pins:  HIGH (all motors DISABLED)"));
+    Serial.println(F("[BOOT]   Drawer LED:    OFF"));
+    Serial.println(F("[BOOT]   TMC429 nCS:    HIGH (inactive)"));
 
-    // Initialize bitbang I2C and MCP23017
+    // Initialize bitbang I2C and MCP23017s
     Serial.println(F("[BOOT] Initializing bitbang I2C on SDA/SCL pins..."));
     Serial.println(F("[BOOT]   NOTE: Wire library excluded. SERCOM5 reserved for Z2 UART."));
     i2c.begin();
@@ -371,51 +451,51 @@ static void processCommand(char *line) {
     else if (strcasecmp(cmd, "io_read") == 0)    { cmdIoRead(); }
     else if (strcasecmp(cmd, "mcu_read") == 0)   { cmdMcuRead(); }
     else if (strcasecmp(cmd, "enable") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: enable <x|y|z>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: enable <z1|z2|m3>")); return; }
         cmdEnable(tokens[1]);
     }
     else if (strcasecmp(cmd, "disable") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: disable <x|y|z>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: disable <z1|z2|m3>")); return; }
         cmdDisable(tokens[1]);
     }
     else if (strcasecmp(cmd, "tmc_init") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: tmc_init <x|y|z1|z2> [baud]")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: tmc_init <z1|z2|m3> [baud]")); return; }
         cmdTmcInit(tokens[1], tokenCount >= 3 ? tokens[2] : nullptr);
     }
     else if (strcasecmp(cmd, "tmc_status") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: tmc_status <x|y|z1|z2>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: tmc_status <z1|z2|m3>")); return; }
         cmdTmcStatus(tokens[1]);
     }
     else if (strcasecmp(cmd, "tmc_current") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: tmc_current <x|y|z1|z2> <percent>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: tmc_current <z1|z2|m3> <percent>")); return; }
         cmdTmcCurrent(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "tmc_hold") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: tmc_hold <x|y|z1|z2> <percent>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: tmc_hold <z1|z2|m3> <percent>")); return; }
         cmdTmcHold(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "tmc_microstep") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: tmc_microstep <x|y|z1|z2> <1..256>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: tmc_microstep <z1|z2|m3> <1..256>")); return; }
         cmdTmcMicrostep(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "tmc_stealthchop") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: tmc_stealthchop <x|y|z1|z2> <on|off>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: tmc_stealthchop <z1|z2|m3> <on|off>")); return; }
         cmdTmcStealthchop(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "tmc_enable") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: tmc_enable <x|y|z1|z2>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: tmc_enable <z1|z2|m3>")); return; }
         cmdTmcEnable(tokens[1]);
     }
     else if (strcasecmp(cmd, "tmc_disable") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: tmc_disable <x|y|z1|z2>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: tmc_disable <z1|z2|m3>")); return; }
         cmdTmcDisable(tokens[1]);
     }
     else if (strcasecmp(cmd, "dir") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: dir <x|y|z> <0|1>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: dir <z1|z2|m3> <0|1>")); return; }
         cmdDir(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "step") == 0) {
-        if (tokenCount < 4) { Serial.println(F("[ERROR] Usage: step <x|y|z> <count> <delay_us>")); return; }
+        if (tokenCount < 4) { Serial.println(F("[ERROR] Usage: step <z1|z2|m3> <count> <delay_us>")); return; }
         cmdStep(tokens[1], tokens[2], tokens[3]);
     }
     // --- TMC429 motion controller commands ---
@@ -426,39 +506,39 @@ static void processCommand(char *line) {
         cmdMcStatus();
     }
     else if (strcasecmp(cmd, "mc_limits") == 0) {
-        if (tokenCount < 5) { Serial.println(F("[ERROR] Usage: mc_limits <x|y|z> <vmin_hz> <vmax_hz> <amax_hz_per_s>")); return; }
+        if (tokenCount < 5) { Serial.println(F("[ERROR] Usage: mc_limits <z1|z2|m3> <vmin_hz> <vmax_hz> <amax_hz_per_s>")); return; }
         cmdMcLimits(tokens[1], tokens[2], tokens[3], tokens[4]);
     }
     else if (strcasecmp(cmd, "mc_ramp") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_ramp <x|y|z>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_ramp <z1|z2|m3>")); return; }
         cmdMcRamp(tokens[1]);
     }
     else if (strcasecmp(cmd, "mc_velocity") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_velocity <x|y|z>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_velocity <z1|z2|m3>")); return; }
         cmdMcVelocity(tokens[1]);
     }
     else if (strcasecmp(cmd, "mc_hold") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_hold <x|y|z>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_hold <z1|z2|m3>")); return; }
         cmdMcHold(tokens[1]);
     }
     else if (strcasecmp(cmd, "mc_target") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_target <x|y|z> <position>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_target <z1|z2|m3> <position>")); return; }
         cmdMcTarget(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "mc_vtarget") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_vtarget <x|y|z> <velocity_hz>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_vtarget <z1|z2|m3> <velocity_hz>")); return; }
         cmdMcVtarget(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "mc_pos") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_pos <x|y|z>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_pos <z1|z2|m3>")); return; }
         cmdMcPos(tokens[1]);
     }
     else if (strcasecmp(cmd, "mc_setpos") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_setpos <x|y|z> <position>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_setpos <z1|z2|m3> <position>")); return; }
         cmdMcSetpos(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "mc_stop") == 0) {
-        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_stop <x|y|z>")); return; }
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: mc_stop <z1|z2|m3>")); return; }
         cmdMcStop(tokens[1]);
     }
     else if (strcasecmp(cmd, "mc_stopall") == 0) {
@@ -472,11 +552,11 @@ static void processCommand(char *line) {
         cmdMcSwpol(tokens[1]);
     }
     else if (strcasecmp(cmd, "mc_leftstop") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_leftstop <x|y|z> <on|off>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_leftstop <z1|z2|m3> <on|off>")); return; }
         cmdMcLeftstop(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "mc_rightstop") == 0) {
-        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_rightstop <x|y|z> <on|off>")); return; }
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: mc_rightstop <z1|z2|m3> <on|off>")); return; }
         cmdMcRightstop(tokens[1], tokens[2]);
     }
     else if (strcasecmp(cmd, "mc_rightsw") == 0) {
@@ -499,6 +579,23 @@ static void processCommand(char *line) {
     else if (strcasecmp(cmd, "led_getconfig") == 0) {
         cmdLedGetconfig();
     }
+    // --- Drawer-handle commands ---
+    else if (strcasecmp(cmd, "drawer_led") == 0) {
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: drawer_led <off|red|green>")); return; }
+        cmdDrawerLed(tokens[1]);
+    }
+    else if (strcasecmp(cmd, "drawer_button") == 0) {
+        cmdDrawerButton();
+    }
+    // --- Solenoid commands ---
+    else if (strcasecmp(cmd, "sol") == 0) {
+        if (tokenCount < 3) { Serial.println(F("[ERROR] Usage: sol <0..11> <on|off>")); return; }
+        cmdSolenoid(tokens[1], tokens[2]);
+    }
+    else if (strcasecmp(cmd, "sol_all") == 0) {
+        if (tokenCount < 2) { Serial.println(F("[ERROR] Usage: sol_all <on|off>")); return; }
+        cmdSolenoidAll(tokens[1]);
+    }
     else {
         Serial.print(F("[ERROR] Unknown command: '"));
         Serial.print(cmd);
@@ -518,115 +615,161 @@ static void cmdHelp() {
         "--- General ---\n"
         "  help                                  Show this help text\n"
         "\n"
-        "--- I/O Expander (MCP23017) ---\n"
-        "  io_init                               Initialize the MCP23017\n"
-        "  io_reset                              Hardware-reset the MCP23017\n"
+        "--- I/O Expanders (MCP23017 @ 0x20 + 0x21) ---\n"
+        "  io_init                               Initialize both MCP23017s\n"
+        "  io_reset                              Hardware-reset both MCP23017s\n"
         "  io_read                               Read all expander inputs\n"
         "\n"
         "--- MCU Pin Readback ---\n"
         "  mcu_read                              Read all MCU output pin states\n"
         "\n"
-        "--- Motor Enable/Disable (hardware nEnable pin) ---\n"
-        "  enable  <x|y|z>                       Pull nEnable LOW  (driver ON)\n"
-        "  disable <x|y|z>                       Pull nEnable HIGH (driver OFF)\n"
+        "--- Motor Enable/Disable (via EXTRA_IO_EXPANDER GPA4..GPA6) ---\n"
+        "  enable  <z1|z2|m3>                    Pull nEnable LOW  (driver ON)\n"
+        "  disable <z1|z2|m3>                    Pull nEnable HIGH (driver OFF)\n"
         "\n"
         "--- TMC2209 UART ---\n"
-        "  tmc_init       <x|y|z1|z2> [baud]     Init UART (default 115200)\n"
-        "  tmc_status     <x|y|z1|z2>            Read TMC2209 status/settings\n"
-        "  tmc_current    <x|y|z1|z2> <percent>  Set run current (0-100%)\n"
-        "  tmc_hold       <x|y|z1|z2> <percent>  Set hold current (0-100%)\n"
-        "  tmc_microstep  <x|y|z1|z2> <n>        Set microsteps (1..256)\n"
-        "  tmc_stealthchop <x|y|z1|z2> <on|off>  Toggle StealthChop mode\n"
-        "  tmc_enable     <x|y|z1|z2>            Software-enable via UART\n"
-        "  tmc_disable    <x|y|z1|z2>            Software-disable via UART\n"
+        "  tmc_init       <z1|z2|m3> [baud]      Init UART (default 115200)\n"
+        "  tmc_status     <z1|z2|m3>             Read TMC2209 status/settings\n"
+        "  tmc_current    <z1|z2|m3> <percent>   Set run current (0-100%)\n"
+        "  tmc_hold       <z1|z2|m3> <percent>   Set hold current (0-100%)\n"
+        "  tmc_microstep  <z1|z2|m3> <n>         Set microsteps (1..256)\n"
+        "  tmc_stealthchop <z1|z2|m3> <on|off>   Toggle StealthChop mode\n"
+        "  tmc_enable     <z1|z2|m3>             Software-enable via UART\n"
+        "  tmc_disable    <z1|z2|m3>             Software-disable via UART\n"
         "\n"
         "--- Direct Pin Control ---\n"
-        "  dir  <x|y|z> <0|1>                    Set direction pin level\n"
-        "  step <x|y|z> <count> <delay_us>       Pulse STEP pin <count> times\n"
+        "  dir  <z1|z2|m3> <0|1>                 Set direction pin level\n"
+        "  step <z1|z2|m3> <count> <delay_us>    Pulse STEP pin <count> times\n"
         "\n"
         "--- TMC429 Motion Controller (mc_) ---\n"
-        "  mc_init [clock_mhz]                    Init SPI + TMC429 (default 32)\n"
-        "  mc_status                              Read version + status flags\n"
-        "  mc_limits <x|y|z> <vmin> <vmax> <amax> Set limits (all in Hz/Hz-per-s)\n"
-        "  mc_ramp <x|y|z>                        Ramp mode (position w/ trapezoid)\n"
-        "  mc_velocity <x|y|z>                    Velocity mode (continuous)\n"
-        "  mc_hold <x|y|z>                        Hold mode (lock position)\n"
-        "  mc_target <x|y|z> <position>           Set target position (ramp mode)\n"
-        "  mc_vtarget <x|y|z> <velocity_hz>       Set target velocity (vel mode)\n"
-        "  mc_pos <x|y|z>                         Read actual + target position\n"
-        "  mc_setpos <x|y|z> <position>           Write actual position register\n"
-        "  mc_stop <x|y|z>                        Stop one axis\n"
-        "  mc_stopall                             Stop all three axes\n"
-        "  mc_switches                            Read all limit switch states\n"
-        "  mc_swpol <high|low>                    Set switch active polarity\n"
-        "  mc_leftstop <x|y|z> <on|off>           Left switch auto-stop\n"
-        "  mc_rightstop <x|y|z> <on|off>          Right switch auto-stop\n"
-        "  mc_rightsw <on|off>                    Enable right switch inputs\n"
+        "  mc_init [clock_mhz]                   Init SPI + TMC429 (default 32)\n"
+        "  mc_status                             Read version + status flags\n"
+        "  mc_limits <z1|z2|m3> <vmin> <vmax> <amax>\n"
+        "                                        Set limits (all Hz or Hz/s)\n"
+        "  mc_ramp <z1|z2|m3>                    Ramp mode (position w/ trapezoid)\n"
+        "  mc_velocity <z1|z2|m3>                Velocity mode (continuous)\n"
+        "  mc_hold <z1|z2|m3>                    Hold mode (lock position)\n"
+        "  mc_target <z1|z2|m3> <position>       Set target position (ramp mode)\n"
+        "  mc_vtarget <z1|z2|m3> <velocity_hz>   Set target velocity (vel mode)\n"
+        "  mc_pos <z1|z2|m3>                     Read actual + target position\n"
+        "  mc_setpos <z1|z2|m3> <position>       Write actual position register\n"
+        "  mc_stop <z1|z2|m3>                    Stop one axis\n"
+        "  mc_stopall                            Stop all three axes\n"
+        "  mc_switches                           Read all limit switch states\n"
+        "  mc_swpol <high|low>                   Set switch active polarity\n"
+        "  mc_leftstop <z1|z2|m3> <on|off>       Left switch auto-stop\n"
+        "  mc_rightstop <z1|z2|m3> <on|off>      Right switch auto-stop\n"
+        "  mc_rightsw <on|off>                   Enable right switch inputs\n"
         "\n"
         "--- LED MCU (I2C slave at 0x30) ---\n"
         "  led_set <ring|all> <anim> <r> <g> <b> <brightness>\n"
-        "                                        Set animation + color + brightness\n"
         "                                        anim: off|static|spin|bounce|pulse\n"
         "                                        r/g/b: 0-255, brightness: 0-255\n"
         "  led_status <ring>                     Query ring animation state\n"
-        "  led_config <param> <value>            Set persistent config parameter\n"
+        "  led_config <param> <value>            Set persistent config param\n"
         "                                        params: num_rings, leds_per_ring,\n"
         "                                        spin_width, bounce_width,\n"
         "                                        spin_speed, bounce_speed,\n"
         "                                        pulse_speed (speeds in ms)\n"
         "  led_getconfig                         Read all config parameters\n"
         "\n"
+        "--- Drawer Handle ---\n"
+        "  drawer_led <off|red|green>            Drive bi-color LED\n"
+        "  drawer_button                         Read drawer button state\n"
+        "\n"
+        "--- Solenoids (TRAY_IO_EXPANDER @ 0x20) ---\n"
+        "  sol <0..11> <on|off>                  Drive single solenoid\n"
+        "  sol_all <on|off>                      Drive all 12 solenoids\n"
+        "\n"
         "NOTES:\n"
-        "  - 'z' controls the shared Z STEP/DIR/ENABLE (both Z1 and Z2).\n"
-        "  - 'z1' and 'z2' address individual TMC2209 UARTs only.\n"
-        "  - Motors are DISABLED at boot. You must 'enable' before stepping.\n"
+        "  - All three motors (z1, z2, m3) use independent STEP/DIR/ENABLE.\n"
+        "  - Motor enables are on EXTRA_IO_EXPANDER: 'io_init' first.\n"
+        "  - Motors are DISABLED at boot. Run 'enable' before 'step'.\n"
         "  - You must 'tmc_init' before any tmc_* command for that motor.\n"
         "==============================================================\n"
     ));
 }
 
 // ============================================================================
-// Command: io_init
+// Command: io_init  (both MCP23017s)
 // ============================================================================
 
-static void cmdIoInit() {
-    Serial.println(F("[IO] Probing MCP23017 at I2C address 0x20..."));
+static bool initExtraExpander() {
+    Serial.println(F("[IO] Probing EXTRA_IO_EXPANDER at 0x21..."));
+    if (!i2c.probe(EXTRA_IO_EXPANDER_ADDR)) {
+        Serial.println(F("[IO] ERROR: EXTRA_IO_EXPANDER (0x21) not found!"));
+        ioExpanderExtraInit = false;
+        return false;
+    }
+    Serial.println(F("[IO]   Device ACKed at 0x21."));
 
-    if (!i2c.probe(IO_EXPANDER_ADDR)) {
-        Serial.println(F("[IO] ERROR: MCP23017 not found on I2C bus!"));
-        Serial.println(F("[IO]   Check wiring, power, and address jumpers (A2=A1=A0=GND)."));
-        ioExpanderInitialized = false;
-        return;
+    // IMPORTANT: write OLATA (nEN pins HIGH = disabled) BEFORE IODIRA, so the
+    // nEN lines never briefly drive LOW (which would enable motors) at the
+    // moment the pins transition from input to output.
+    bool ok = true;
+    extraOlatA = EXTRA_OLATA_SAFE;
+    ok &= i2c.writeRegister(EXTRA_IO_EXPANDER_ADDR, MCP_REG_OLATA,  extraOlatA);
+    ok &= i2c.writeRegister(EXTRA_IO_EXPANDER_ADDR, MCP_REG_OLATB,  0x00);
+    ok &= i2c.writeRegister(EXTRA_IO_EXPANDER_ADDR, MCP_REG_IODIRA, EXTRA_IODIRA);
+    ok &= i2c.writeRegister(EXTRA_IO_EXPANDER_ADDR, MCP_REG_IODIRB, EXTRA_IODIRB);
+    if (!ok) {
+        Serial.println(F("[IO] ERROR: Failed to configure 0x21!"));
+        ioExpanderExtraInit = false;
+        return false;
+    }
+
+    ioExpanderExtraInit = true;
+    Serial.println(F("[IO] EXTRA_IO_EXPANDER (0x21) initialized."));
+    Serial.println(F("[IO]   GPA0-GPA2: DIAG Z1/Z2/M3 (inputs)"));
+    Serial.println(F("[IO]   GPA4-GPA6: nEN Z1/Z2/M3 (outputs, HIGH=DISABLED)"));
+    Serial.println(F("[IO]   GPA7:      Drawer button (input)"));
+    Serial.println(F("[IO]   GPB0-GPB3: Z_TOP/Z_BOT/SPARE_TOP/SPARE_BOT (inputs)"));
+    return true;
+}
+
+static bool initTrayExpander() {
+    Serial.println(F("[IO] Probing TRAY_IO_EXPANDER at 0x20..."));
+    if (!i2c.probe(TRAY_IO_EXPANDER_ADDR)) {
+        Serial.println(F("[IO] ERROR: TRAY_IO_EXPANDER (0x20) not found!"));
+        ioExpanderTrayInit = false;
+        return false;
     }
     Serial.println(F("[IO]   Device ACKed at 0x20."));
 
-    // Configure all ports as inputs (0xFF). This is the power-on default,
-    // but we set it explicitly to be safe after a partial init or soft reset.
+    // Solenoids default OFF (OLAT = 0). Write OLATs before IODIRs so pins
+    // never transition to output with undefined drive.
     bool ok = true;
-    ok &= i2c.writeRegister(IO_EXPANDER_ADDR, MCP_REG_IODIRA, 0xFF);
-    ok &= i2c.writeRegister(IO_EXPANDER_ADDR, MCP_REG_IODIRB, 0xFF);
-
+    trayOlatA = TRAY_OLATA_SAFE;
+    trayOlatB = TRAY_OLATB_SAFE;
+    ok &= i2c.writeRegister(TRAY_IO_EXPANDER_ADDR, MCP_REG_OLATA,  trayOlatA);
+    ok &= i2c.writeRegister(TRAY_IO_EXPANDER_ADDR, MCP_REG_OLATB,  trayOlatB);
+    ok &= i2c.writeRegister(TRAY_IO_EXPANDER_ADDR, MCP_REG_IODIRA, TRAY_IODIRA);
+    ok &= i2c.writeRegister(TRAY_IO_EXPANDER_ADDR, MCP_REG_IODIRB, TRAY_IODIRB);
     if (!ok) {
-        Serial.println(F("[IO] ERROR: Failed to write direction registers!"));
-        ioExpanderInitialized = false;
-        return;
+        Serial.println(F("[IO] ERROR: Failed to configure 0x20!"));
+        ioExpanderTrayInit = false;
+        return false;
     }
 
-    ioExpanderInitialized = true;
-    Serial.println(F("[IO] MCP23017 initialized successfully."));
-    Serial.println(F("[IO]   IODIRA=0xFF, IODIRB=0xFF (all inputs)."));
-    Serial.println(F("[IO]   GPA0-GPA3: TMC2209 DIAG pins (X, Y, Z1, Z2)"));
-    Serial.println(F("[IO]   GPB2-GPB3: X limit switches (END1, END2)"));
-    Serial.println(F("[IO]   GPB4-GPB5: Y limit switches (END1, END2)"));
-    Serial.println(F("[IO]   GPB6-GPB7: Z limit switches (END1, END2)"));
+    ioExpanderTrayInit = true;
+    Serial.println(F("[IO] TRAY_IO_EXPANDER (0x20) initialized."));
+    Serial.println(F("[IO]   GPA0-GPA7: SOL0-SOL7  (outputs, LOW=off)"));
+    Serial.println(F("[IO]   GPB0-GPB3: SOL8-SOL11 (outputs, LOW=off)"));
+    Serial.println(F("[IO]   GPB4-GPB7: reserved   (inputs)"));
+    return true;
+}
+
+static void cmdIoInit() {
+    initExtraExpander();
+    initTrayExpander();
 }
 
 // ============================================================================
-// Command: io_reset
+// Command: io_reset  (common nRESET line for both MCP23017s)
 // ============================================================================
 
 static void cmdIoReset() {
-    Serial.println(F("[IO] Performing hardware reset of MCP23017..."));
+    Serial.println(F("[IO] Hardware-resetting both MCP23017s..."));
     Serial.println(F("[IO]   Driving nRESET LOW for 10 ms..."));
 
     pinMode(PIN_IO_NRESET, OUTPUT);
@@ -648,34 +791,65 @@ static void cmdIoReset() {
 // ============================================================================
 
 static void cmdIoRead() {
-    if (!ioExpanderInitialized) {
-        Serial.println(F("[IO] ERROR: MCP23017 not initialized. Run 'io_init' first."));
+    if (!ioExpanderExtraInit && !ioExpanderTrayInit) {
+        Serial.println(F("[IO] ERROR: No expanders initialized. Run 'io_init'."));
         return;
     }
 
-    uint8_t gpioA = 0, gpioB = 0;
-    if (!i2c.readRegister16(IO_EXPANDER_ADDR, MCP_REG_GPIOA, gpioA, gpioB)) {
-        Serial.println(F("[IO] ERROR: Failed to read GPIO registers!"));
-        return;
+    // --- EXTRA (0x21) ---
+    if (ioExpanderExtraInit) {
+        uint8_t gpioA = 0, gpioB = 0;
+        if (!i2c.readRegister16(EXTRA_IO_EXPANDER_ADDR, MCP_REG_GPIOA, gpioA, gpioB)) {
+            Serial.println(F("[IO] ERROR: Failed to read 0x21 GPIO registers!"));
+        } else {
+            Serial.println(F("[IO] === EXTRA_IO_EXPANDER (0x21) ==="));
+            Serial.print(F("[IO]   Raw: GPIOA=0x")); Serial.print(gpioA, HEX);
+            Serial.print(F(", GPIOB=0x")); Serial.println(gpioB, HEX);
+
+            Serial.println(F("[IO]   --- TMC2209 DIAG ---"));
+            Serial.print(F("[IO]     Z1 DIAG (GPA0): ")); Serial.println((gpioA >> BIT_Z1_DIAG) & 1 ? "HIGH" : "LOW");
+            Serial.print(F("[IO]     Z2 DIAG (GPA1): ")); Serial.println((gpioA >> BIT_Z2_DIAG) & 1 ? "HIGH" : "LOW");
+            Serial.print(F("[IO]     M3 DIAG (GPA2): ")); Serial.println((gpioA >> BIT_M3_DIAG) & 1 ? "HIGH" : "LOW");
+
+            Serial.println(F("[IO]   --- Motor nEN (readback) ---"));
+            Serial.print(F("[IO]     Z1 nEN  (GPA4): ")); Serial.println((gpioA >> BIT_Z1_NEN) & 1 ? "HIGH (disabled)" : "LOW (enabled)");
+            Serial.print(F("[IO]     Z2 nEN  (GPA5): ")); Serial.println((gpioA >> BIT_Z2_NEN) & 1 ? "HIGH (disabled)" : "LOW (enabled)");
+            Serial.print(F("[IO]     M3 nEN  (GPA6): ")); Serial.println((gpioA >> BIT_M3_NEN) & 1 ? "HIGH (disabled)" : "LOW (enabled)");
+
+            Serial.println(F("[IO]   --- Drawer Button ---"));
+            Serial.print(F("[IO]     DRAWER  (GPA7): ")); Serial.println((gpioA >> BIT_DRAWER_BTN) & 1 ? "PRESSED" : "released");
+
+            Serial.println(F("[IO]   --- Limit Switches ---"));
+            Serial.print(F("[IO]     Z_TOP     (GPB0): ")); Serial.println((gpioB >> BIT_Z_TOP)     & 1 ? "TRIGGERED" : "open");
+            Serial.print(F("[IO]     Z_BOT     (GPB1): ")); Serial.println((gpioB >> BIT_Z_BOT)     & 1 ? "TRIGGERED" : "open");
+            Serial.print(F("[IO]     SPARE_TOP (GPB2): ")); Serial.println((gpioB >> BIT_SPARE_TOP) & 1 ? "TRIGGERED" : "open");
+            Serial.print(F("[IO]     SPARE_BOT (GPB3): ")); Serial.println((gpioB >> BIT_SPARE_BOT) & 1 ? "TRIGGERED" : "open");
+        }
+    } else {
+        Serial.println(F("[IO] EXTRA_IO_EXPANDER (0x21) NOT INITIALIZED."));
     }
 
-    Serial.println(F("[IO] Reading all MCP23017 inputs:"));
-    Serial.print(F("[IO]   Raw: GPIOA=0x")); Serial.print(gpioA, HEX);
-    Serial.print(F(", GPIOB=0x")); Serial.println(gpioB, HEX);
-
-    Serial.println(F("[IO] --- TMC2209 DIAG Pins ---"));
-    Serial.print(F("[IO]   X  DIAG (GPA0): ")); Serial.println((gpioA >> BIT_X_DIAG)  & 1 ? "HIGH" : "LOW");
-    Serial.print(F("[IO]   Y  DIAG (GPA1): ")); Serial.println((gpioA >> BIT_Y_DIAG)  & 1 ? "HIGH" : "LOW");
-    Serial.print(F("[IO]   Z1 DIAG (GPA2): ")); Serial.println((gpioA >> BIT_Z1_DIAG) & 1 ? "HIGH" : "LOW");
-    Serial.print(F("[IO]   Z2 DIAG (GPA3): ")); Serial.println((gpioA >> BIT_Z2_DIAG) & 1 ? "HIGH" : "LOW");
-
-    Serial.println(F("[IO] --- Limit Switches (active HIGH) ---"));
-    Serial.print(F("[IO]   X  END1 (GPB2): ")); Serial.println((gpioB >> BIT_X_END1) & 1 ? "TRIGGERED" : "open");
-    Serial.print(F("[IO]   X  END2 (GPB3): ")); Serial.println((gpioB >> BIT_X_END2) & 1 ? "TRIGGERED" : "open");
-    Serial.print(F("[IO]   Y  END1 (GPB4): ")); Serial.println((gpioB >> BIT_Y_END1) & 1 ? "TRIGGERED" : "open");
-    Serial.print(F("[IO]   Y  END2 (GPB5): ")); Serial.println((gpioB >> BIT_Y_END2) & 1 ? "TRIGGERED" : "open");
-    Serial.print(F("[IO]   Z  END1 (GPB6): ")); Serial.println((gpioB >> BIT_Z_END1) & 1 ? "TRIGGERED" : "open");
-    Serial.print(F("[IO]   Z  END2 (GPB7): ")); Serial.println((gpioB >> BIT_Z_END2) & 1 ? "TRIGGERED" : "open");
+    // --- TRAY (0x20) ---
+    if (ioExpanderTrayInit) {
+        uint8_t gpioA = 0, gpioB = 0;
+        if (!i2c.readRegister16(TRAY_IO_EXPANDER_ADDR, MCP_REG_GPIOA, gpioA, gpioB)) {
+            Serial.println(F("[IO] ERROR: Failed to read 0x20 GPIO registers!"));
+        } else {
+            Serial.println(F("[IO] === TRAY_IO_EXPANDER (0x20) ==="));
+            Serial.print(F("[IO]   Raw: GPIOA=0x")); Serial.print(gpioA, HEX);
+            Serial.print(F(", GPIOB=0x")); Serial.println(gpioB, HEX);
+            Serial.print(F("[IO]   Solenoid readback: "));
+            for (uint8_t i = 0; i < NUM_SOLENOIDS; i++) {
+                uint8_t bitSet = (i < 8) ? ((gpioA >> i) & 1) : ((gpioB >> (i - 8)) & 1);
+                if (i > 0) Serial.print(F(","));
+                Serial.print(F("SOL")); Serial.print(i);
+                Serial.print(F("=")); Serial.print(bitSet ? "ON" : "off");
+            }
+            Serial.println();
+        }
+    } else {
+        Serial.println(F("[IO] TRAY_IO_EXPANDER (0x20) NOT INITIALIZED."));
+    }
 }
 
 // ============================================================================
@@ -686,49 +860,81 @@ static void cmdMcuRead() {
     Serial.println(F("[MCU] Reading back all MCU-controlled pin states:"));
 
     Serial.println(F("[MCU] --- Motor STEP Pins ---"));
-    Serial.print(F("[MCU]   X  STEP (A1):  ")); Serial.println(digitalRead(PIN_X_STEP) ? "HIGH" : "LOW");
-    Serial.print(F("[MCU]   Y  STEP (A3):  ")); Serial.println(digitalRead(PIN_Y_STEP) ? "HIGH" : "LOW");
-    Serial.print(F("[MCU]   Z  STEP (A5):  ")); Serial.println(digitalRead(PIN_Z_STEP) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   Z1 STEP (A1): ")); Serial.println(digitalRead(PIN_Z1_STEP) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   Z2 STEP (A3): ")); Serial.println(digitalRead(PIN_Z2_STEP) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   M3 STEP (A5): ")); Serial.println(digitalRead(PIN_M3_STEP) ? "HIGH" : "LOW");
 
     Serial.println(F("[MCU] --- Motor DIR Pins ---"));
-    Serial.print(F("[MCU]   X  DIR  (A0):  ")); Serial.println(digitalRead(PIN_X_DIR) ? "HIGH" : "LOW");
-    Serial.print(F("[MCU]   Y  DIR  (A2):  ")); Serial.println(digitalRead(PIN_Y_DIR) ? "HIGH" : "LOW");
-    Serial.print(F("[MCU]   Z  DIR  (A4):  ")); Serial.println(digitalRead(PIN_Z_DIR) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   Z1 DIR  (A0): ")); Serial.println(digitalRead(PIN_Z1_DIR) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   Z2 DIR  (A2): ")); Serial.println(digitalRead(PIN_Z2_DIR) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   M3 DIR  (A4): ")); Serial.println(digitalRead(PIN_M3_DIR) ? "HIGH" : "LOW");
 
-    Serial.println(F("[MCU] --- Motor nEnable Pins (LOW=enabled, HIGH=disabled) ---"));
-    Serial.print(F("[MCU]   X  nEN  (D10): ")); Serial.println(digitalRead(PIN_X_NENABLE) ? "HIGH (disabled)" : "LOW (enabled)");
-    Serial.print(F("[MCU]   Y  nEN  (D9):  ")); Serial.println(digitalRead(PIN_Y_NENABLE) ? "HIGH (disabled)" : "LOW (enabled)");
-    Serial.print(F("[MCU]   Z  nEN  (D8):  ")); Serial.println(digitalRead(PIN_Z_NENABLE) ? "HIGH (disabled)" : "LOW (enabled)");
+    Serial.println(F("[MCU] --- Drawer LED H-Bridge ---"));
+    Serial.print(F("[MCU]   IN1 (D10): ")); Serial.println(digitalRead(PIN_DRAWER_LED_IN1) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   IN2 (D11): ")); Serial.println(digitalRead(PIN_DRAWER_LED_IN2) ? "HIGH" : "LOW");
 
-    Serial.println(F("[MCU] --- I/O Expander nRESET (D6) ---"));
-    Serial.print(F("[MCU]   IO nRST (D6):  "));
+    Serial.println(F("[MCU] --- TMC429 SPI ---"));
+    Serial.print(F("[MCU]   nCS (D6):  ")); Serial.println(digitalRead(PIN_MC_NCS) ? "HIGH (inactive)" : "LOW (selected)");
+
+    Serial.println(F("[MCU] --- I/O Expander nRESET (D8) ---"));
+    Serial.print(F("[MCU]   IO nRST:   "));
     Serial.println(digitalRead(PIN_IO_NRESET) ? "HIGH (not in reset)" : "LOW (in reset!)");
 }
 
 // ============================================================================
-// enable / disable
+// enable / disable  (via EXTRA_IO_EXPANDER OLATA)
 // ============================================================================
 
-static void cmdEnable(const char *axis) {
-    uint8_t stepPin, dirPin, enablePin;
-    bool valid;
-    getAxisPins(axis, stepPin, dirPin, enablePin, valid);
-    if (!valid) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+static int enableBitForAxis(const char *axis) {
+    if (strcasecmp(axis, "z1") == 0) return BIT_Z1_NEN;
+    if (strcasecmp(axis, "z2") == 0) return BIT_Z2_NEN;
+    if (strcasecmp(axis, "m3") == 0) return BIT_M3_NEN;
+    return -1;
+}
 
-    digitalWrite(enablePin, LOW);
+static bool writeExtraOlatA(uint8_t value) {
+    if (!i2c.writeRegister(EXTRA_IO_EXPANDER_ADDR, MCP_REG_OLATA, value)) {
+        Serial.println(F("[MOTOR] ERROR: I2C write to EXTRA_IO_EXPANDER failed!"));
+        return false;
+    }
+    extraOlatA = value;
+    return true;
+}
+
+static void cmdEnable(const char *axis) {
+    if (!ioExpanderExtraInit) {
+        Serial.println(F("[MOTOR] ERROR: EXTRA_IO_EXPANDER not initialized. Run 'io_init'.")); return;
+    }
+    int bit = enableBitForAxis(axis);
+    if (bit < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
+
+    uint8_t newVal = extraOlatA & (uint8_t)~(1 << bit); // clear bit -> LOW -> enabled
+    if (!writeExtraOlatA(newVal)) return;
+
     Serial.print(F("[MOTOR] Axis ")); Serial.print(axis);
     Serial.println(F(" ENABLED (nEnable driven LOW)."));
 }
 
 static void cmdDisable(const char *axis) {
-    uint8_t stepPin, dirPin, enablePin;
-    bool valid;
-    getAxisPins(axis, stepPin, dirPin, enablePin, valid);
-    if (!valid) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (!ioExpanderExtraInit) {
+        Serial.println(F("[MOTOR] ERROR: EXTRA_IO_EXPANDER not initialized. Run 'io_init'.")); return;
+    }
+    int bit = enableBitForAxis(axis);
+    if (bit < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
-    digitalWrite(enablePin, HIGH);
+    uint8_t newVal = extraOlatA | (uint8_t)(1 << bit); // set bit -> HIGH -> disabled
+    if (!writeExtraOlatA(newVal)) return;
+
     Serial.print(F("[MOTOR] Axis ")); Serial.print(axis);
     Serial.println(F(" DISABLED (nEnable driven HIGH)."));
+}
+
+// Query whether the given axis is hardware-enabled (nEN LOW). Returns true if
+// enabled, false if disabled or unknown. Does not log on its own.
+static bool axisHardwareEnabled(const char *axis) {
+    int bit = enableBitForAxis(axis);
+    if (bit < 0) return false;
+    return (extraOlatA & (1 << bit)) == 0;
 }
 
 // ============================================================================
@@ -746,22 +952,7 @@ static void cmdTmcInit(const char *motor, const char *baudStr) {
     Serial.print(motor);
     Serial.print(F("' at ")); Serial.print(baud); Serial.println(F(" baud..."));
 
-    if (strcasecmp(motor, "x") == 0) {
-        tmcX.setup(XMotorSerial, baud);
-        pinPeripheral(PIN_X_UART_RX, PIO_SERCOM);
-        pinPeripheral(PIN_X_UART_TX, PIO_SERCOM);
-        // Flush garbage bytes caused by SERCOM init before pin mux was set
-        while (XMotorSerial.available()) XMotorSerial.read();
-        tmcXInitialized = true;
-        Serial.println(F("[TMC]   SERCOM4 (TX=D7/PB12, RX=D4/PB13)."));
-    }
-    else if (strcasecmp(motor, "y") == 0) {
-        tmcY.setup(Serial1, baud);
-        while (Serial1.available()) Serial1.read();
-        tmcYInitialized = true;
-        Serial.println(F("[TMC]   Serial1/SERCOM3 (TX=D1/PA22, RX=D0/PA23)."));
-    }
-    else if (strcasecmp(motor, "z1") == 0) {
+    if (strcasecmp(motor, "z1") == 0) {
         tmcZ1.setup(Z1MotorSerial, baud);
         pinPeripheral(PIN_Z1_UART_RX, PIO_SERCOM);
         pinPeripheral(PIN_Z1_UART_TX, PIO_SERCOM);
@@ -777,8 +968,14 @@ static void cmdTmcInit(const char *motor, const char *baudStr) {
         tmcZ2Initialized = true;
         Serial.println(F("[TMC]   SERCOM5 (TX=D3/PB16, RX=D2/PB17)."));
     }
+    else if (strcasecmp(motor, "m3") == 0) {
+        tmcM3.setup(Serial1, baud);
+        while (Serial1.available()) Serial1.read();
+        tmcM3Initialized = true;
+        Serial.println(F("[TMC]   Serial1/SERCOM3 (TX=D1/PA22, RX=D0/PA23)."));
+    }
     else {
-        Serial.println(F("[ERROR] Invalid motor. Use: x, y, z1, or z2"));
+        Serial.println(F("[ERROR] Invalid motor. Use: z1, z2, or m3"));
         return;
     }
 
@@ -799,7 +996,7 @@ static void cmdTmcInit(const char *motor, const char *baudStr) {
 
 static void cmdTmcStatus(const char *motor) {
     TMC2209 *tmc = lookupTmc(motor);
-    if (!tmc) { Serial.println(F("[ERROR] Invalid motor. Use: x, y, z1, or z2")); return; }
+    if (!tmc) { Serial.println(F("[ERROR] Invalid motor. Use: z1, z2, or m3")); return; }
     if (!isTmcInitialized(motor)) {
         Serial.print(F("[ERROR] '")); Serial.print(motor);
         Serial.println(F("' not initialized. Run 'tmc_init' first.")); return;
@@ -963,10 +1160,10 @@ static void cmdTmcDisable(const char *motor) {
 // ============================================================================
 
 static void cmdDir(const char *axis, const char *valStr) {
-    uint8_t stepPin, dirPin, enablePin;
+    uint8_t stepPin, dirPin;
     bool valid;
-    getAxisPins(axis, stepPin, dirPin, enablePin, valid);
-    if (!valid) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    getAxisPins(axis, stepPin, dirPin, valid);
+    if (!valid) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     int val = atoi(valStr);
     if (val != 0 && val != 1) { Serial.println(F("[ERROR] Must be 0 or 1.")); return; }
@@ -977,17 +1174,17 @@ static void cmdDir(const char *axis, const char *valStr) {
 }
 
 static void cmdStep(const char *axis, const char *countStr, const char *delayStr) {
-    uint8_t stepPin, dirPin, enablePin;
+    uint8_t stepPin, dirPin;
     bool valid;
-    getAxisPins(axis, stepPin, dirPin, enablePin, valid);
-    if (!valid) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    getAxisPins(axis, stepPin, dirPin, valid);
+    if (!valid) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     long count = atol(countStr);
     long delayUs = atol(delayStr);
     if (count <= 0) { Serial.println(F("[ERROR] Count must be positive.")); return; }
     if (delayUs < 2) { Serial.println(F("[ERROR] Delay must be >= 2 us.")); return; }
 
-    if (digitalRead(enablePin) == HIGH) {
+    if (!axisHardwareEnabled(axis)) {
         Serial.println(F("[MOTOR] WARNING: nEnable is HIGH - driver disabled!"));
         Serial.println(F("[MOTOR]   Pulses will be generated but motor will not move."));
     }
@@ -1013,12 +1210,21 @@ static void cmdStep(const char *axis, const char *countStr, const char *delayStr
 // TMC429 Motion Controller Commands
 // ============================================================================
 
-// Helper: convert axis string to TMC429 motor index (0=X/M1, 1=Y/M2, 2=Z/M3)
+// Helper: convert axis string to TMC429 motor index (0=z1, 1=z2, 2=m3)
 static int lookupMcMotor(const char *axis) {
-    if (strcasecmp(axis, "x") == 0) return 0;
-    if (strcasecmp(axis, "y") == 0) return 1;
-    if (strcasecmp(axis, "z") == 0) return 2;
+    if (strcasecmp(axis, "z1") == 0) return 0;
+    if (strcasecmp(axis, "z2") == 0) return 1;
+    if (strcasecmp(axis, "m3") == 0) return 2;
     return -1;
+}
+
+static const char *mcMotorName(int m) {
+    switch (m) {
+        case 0: return "Z1";
+        case 1: return "Z2";
+        case 2: return "M3";
+        default: return "??";
+    }
 }
 
 // Helper: check if mc is initialized and print error if not
@@ -1032,7 +1238,7 @@ static bool requireMc() {
 
 // mc_init [clock_mhz]
 static void cmdMcInit(const char *clkStr) {
-    uint8_t clkMhz = 32; // Default: 32 MHz (TOGNJING XOS20032000LT00351005)
+    uint8_t clkMhz = 32; // Default: 32 MHz
     if (clkStr) {
         int val = atoi(clkStr);
         if (val < 4 || val > 32) {
@@ -1042,11 +1248,18 @@ static void cmdMcInit(const char *clkStr) {
         clkMhz = (uint8_t)val;
     }
 
-    Serial.print(F("[MC] Initializing TMC429 on SPI (nCS=D5) with clock="));
+    Serial.print(F("[MC] Initializing TMC429 on SERCOM4 SPI (nCS=D6) with clock="));
     Serial.print(clkMhz);
     Serial.println(F(" MHz..."));
 
+    // setup() will call spiBegin() on our SPI_MC instance via the override.
     motionController.setup(PIN_MC_NCS, clkMhz);
+
+    // After SPI.begin(), re-mux the SPI pins to SERCOM4 (pinPeripheral is a
+    // no-op for the default BSP SPI pins, but required for SERCOM4's pads).
+    pinPeripheral(PIN_MC_MOSI, PIO_SERCOM);
+    pinPeripheral(PIN_MC_SCK,  PIO_SERCOM);
+    pinPeripheral(PIN_MC_MISO, PIO_SERCOM);
 
     if (motionController.communicating()) {
         uint32_t ver = motionController.getVersion();
@@ -1055,14 +1268,12 @@ static void cmdMcInit(const char *clkStr) {
         Serial.println(ver, HEX);
         mcInitialized = true;
 
-        // Configure for step/direction output mode (not SPI driver chain).
-        // The library's setup() calls setStepDirOutput() internally.
         Serial.println(F("[MC]   Step/Dir output mode active."));
-        Serial.println(F("[MC]   Motor mapping: X=motor0(M1), Y=motor1(M2), Z=motor2(M3)"));
+        Serial.println(F("[MC]   Motor mapping: z1=motor0 (M1), z2=motor1 (M2), m3=motor2 (M3)"));
         Serial.println(F("[MC]   Limit switches: END1=Left, END2=Right"));
     } else {
         Serial.println(F("[MC]   ERROR: TMC429 not responding!"));
-        Serial.println(F("[MC]   Check: SPI wiring, clock, power, nCS (D5)."));
+        Serial.println(F("[MC]   Check: SPI wiring (D4-D7), clock, power, nCS (D6)."));
         mcInitialized = false;
     }
 }
@@ -1076,18 +1287,16 @@ static void cmdMcStatus() {
 
     TMC429::Status st = motionController.getStatus();
     Serial.println(F("[MC] Status flags:"));
-    Serial.print(F("[MC]   At target pos M0 (X): ")); Serial.println(st.at_target_position_0 ? "YES" : "no");
-    Serial.print(F("[MC]   At target pos M1 (Y): ")); Serial.println(st.at_target_position_1 ? "YES" : "no");
-    Serial.print(F("[MC]   At target pos M2 (Z): ")); Serial.println(st.at_target_position_2 ? "YES" : "no");
-    Serial.print(F("[MC]   Switch left M0 (X):   ")); Serial.println(st.switch_left_0 ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Switch left M1 (Y):   ")); Serial.println(st.switch_left_1 ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Switch left M2 (Z):   ")); Serial.println(st.switch_left_2 ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Interrupt:             ")); Serial.println(st.interrupt ? "YES" : "no");
+    Serial.print(F("[MC]   At target pos M0 (z1): ")); Serial.println(st.at_target_position_0 ? "YES" : "no");
+    Serial.print(F("[MC]   At target pos M1 (z2): ")); Serial.println(st.at_target_position_1 ? "YES" : "no");
+    Serial.print(F("[MC]   At target pos M2 (m3): ")); Serial.println(st.at_target_position_2 ? "YES" : "no");
+    Serial.print(F("[MC]   Switch left M0 (z1):   ")); Serial.println(st.switch_left_0 ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   Switch left M1 (z2):   ")); Serial.println(st.switch_left_1 ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   Switch left M2 (m3):   ")); Serial.println(st.switch_left_2 ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   Interrupt:              ")); Serial.println(st.interrupt ? "YES" : "no");
 
-    // Print position and velocity for all three axes
     for (int m = 0; m < 3; m++) {
-        const char *name = (m == 0) ? "X" : (m == 1) ? "Y" : "Z";
-        Serial.print(F("[MC]   Motor ")); Serial.print(name);
+        Serial.print(F("[MC]   Motor ")); Serial.print(mcMotorName(m));
         Serial.print(F(": pos=")); Serial.print(motionController.getActualPosition(m));
         Serial.print(F(" target=")); Serial.print(motionController.getTargetPosition(m));
         Serial.print(F(" vel=")); Serial.print(motionController.getActualVelocityInHz(m));
@@ -1099,7 +1308,7 @@ static void cmdMcStatus() {
 static void cmdMcLimits(const char *axis, const char *vminStr, const char *vmaxStr, const char *amaxStr) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     uint32_t vmin = (uint32_t)atol(vminStr);
     uint32_t vmax = (uint32_t)atol(vmaxStr);
@@ -1119,7 +1328,6 @@ static void cmdMcLimits(const char *axis, const char *vminStr, const char *vmaxS
 
     motionController.setLimitsInHz(m, vmin, vmax, amax);
 
-    // Read back what was actually set (may differ due to register resolution)
     Serial.print(F("[MC]   Actual vmin=")); Serial.print(motionController.getVelocityMinInHz(m));
     Serial.print(F(" Hz, vmax=")); Serial.print(motionController.getVelocityMaxInHz(m));
     Serial.print(F(" Hz, amax=")); Serial.print(motionController.getAccelerationMaxInHzPerS(m));
@@ -1130,7 +1338,7 @@ static void cmdMcLimits(const char *axis, const char *vminStr, const char *vmaxS
 static void cmdMcRamp(const char *axis) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     motionController.setRampMode(m);
     Serial.print(F("[MC] Axis ")); Serial.print(axis);
@@ -1141,7 +1349,7 @@ static void cmdMcRamp(const char *axis) {
 static void cmdMcVelocity(const char *axis) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     motionController.setVelocityMode(m);
     Serial.print(F("[MC] Axis ")); Serial.print(axis);
@@ -1152,7 +1360,7 @@ static void cmdMcVelocity(const char *axis) {
 static void cmdMcHold(const char *axis) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     motionController.setHoldMode(m);
     Serial.print(F("[MC] Axis ")); Serial.print(axis);
@@ -1163,7 +1371,7 @@ static void cmdMcHold(const char *axis) {
 static void cmdMcTarget(const char *axis, const char *posStr) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     int32_t pos = (int32_t)atol(posStr);
     motionController.setTargetPosition(m, pos);
@@ -1175,7 +1383,7 @@ static void cmdMcTarget(const char *axis, const char *posStr) {
 static void cmdMcVtarget(const char *axis, const char *velStr) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     int32_t vel = (int32_t)atol(velStr);
     motionController.setTargetVelocityInHz(m, vel);
@@ -1188,7 +1396,7 @@ static void cmdMcVtarget(const char *axis, const char *velStr) {
 static void cmdMcPos(const char *axis) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     int32_t actual = motionController.getActualPosition(m);
     int32_t target = motionController.getTargetPosition(m);
@@ -1206,7 +1414,7 @@ static void cmdMcPos(const char *axis) {
 static void cmdMcSetpos(const char *axis, const char *posStr) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     int32_t pos = (int32_t)atol(posStr);
     motionController.setActualPosition(m, pos);
@@ -1218,7 +1426,7 @@ static void cmdMcSetpos(const char *axis, const char *posStr) {
 static void cmdMcStop(const char *axis) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     motionController.stop(m);
     Serial.print(F("[MC] Axis ")); Serial.print(axis);
@@ -1238,18 +1446,16 @@ static void cmdMcSwitches() {
     if (!requireMc()) return;
 
     Serial.println(F("[MC] Limit switch states (as seen by TMC429):"));
-    Serial.print(F("[MC]   X Left  (END1/REF1L): ")); Serial.println(motionController.leftSwitchActive(0)  ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   X Right (END2/REF1R): ")); Serial.println(motionController.rightSwitchActive(0) ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Y Left  (END1/REF2L): ")); Serial.println(motionController.leftSwitchActive(1)  ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Y Right (END2/REF2R): ")); Serial.println(motionController.rightSwitchActive(1) ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Z Left  (END1/REF3L): ")); Serial.println(motionController.leftSwitchActive(2)  ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Z Right (END2/REF3R): ")); Serial.println(motionController.rightSwitchActive(2) ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   z1 Left  (END1/REF1L): ")); Serial.println(motionController.leftSwitchActive(0)  ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   z1 Right (END2/REF1R): ")); Serial.println(motionController.rightSwitchActive(0) ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   z2 Left  (END1/REF2L): ")); Serial.println(motionController.leftSwitchActive(1)  ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   z2 Right (END2/REF2R): ")); Serial.println(motionController.rightSwitchActive(1) ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   m3 Left  (END1/REF3L): ")); Serial.println(motionController.leftSwitchActive(2)  ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   m3 Right (END2/REF3R): ")); Serial.println(motionController.rightSwitchActive(2) ? "ACTIVE" : "inactive");
 
-    // Also report stop-on-switch settings
     Serial.println(F("[MC] Auto-stop configuration:"));
     for (int m = 0; m < 3; m++) {
-        const char *name = (m == 0) ? "X" : (m == 1) ? "Y" : "Z";
-        Serial.print(F("[MC]   ")); Serial.print(name);
+        Serial.print(F("[MC]   ")); Serial.print(mcMotorName(m));
         Serial.print(F(" left-stop: ")); Serial.print(motionController.leftSwitchStopEnabled(m) ? "ON" : "OFF");
         Serial.print(F(", right-stop: ")); Serial.println(motionController.rightSwitchStopEnabled(m) ? "ON" : "OFF");
     }
@@ -1275,7 +1481,7 @@ static void cmdMcSwpol(const char *state) {
 static void cmdMcLeftstop(const char *axis, const char *state) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     if (strcasecmp(state, "on") == 0) {
         motionController.enableLeftSwitchStop(m);
@@ -1294,7 +1500,7 @@ static void cmdMcLeftstop(const char *axis, const char *state) {
 static void cmdMcRightstop(const char *axis, const char *state) {
     if (!requireMc()) return;
     int m = lookupMcMotor(axis);
-    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: x, y, or z")); return; }
+    if (m < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z1, z2, or m3")); return; }
 
     if (strcasecmp(state, "on") == 0) {
         motionController.enableRightSwitchStop(m);
@@ -1328,7 +1534,6 @@ static void cmdMcRightsw(const char *state) {
 // LED MCU Commands (I2C communication with LED MCU at address 0x30)
 // ============================================================================
 
-/// Helper: print LED MCU response code
 static void printLedRsp(uint8_t rsp) {
     switch (rsp) {
         case LED_RSP_OK:      Serial.println(F("OK"));              break;
@@ -1338,7 +1543,6 @@ static void printLedRsp(uint8_t rsp) {
     }
 }
 
-/// Helper: parse animation name string to protocol byte. Returns 0xFF on error.
 static uint8_t parseAnimName(const char *name) {
     if (strcasecmp(name, "off")    == 0) return LED_ANIM_OFF;
     if (strcasecmp(name, "static") == 0) return LED_ANIM_STATIC;
@@ -1348,7 +1552,6 @@ static uint8_t parseAnimName(const char *name) {
     return 0xFF;
 }
 
-/// Helper: animation byte to name string
 static const char *animName(uint8_t anim) {
     switch (anim) {
         case LED_ANIM_OFF:    return "off";
@@ -1360,9 +1563,7 @@ static const char *animName(uint8_t anim) {
     }
 }
 
-// led_set <ring|all> <off|static|spin|bounce|pulse> <r> <g> <b> <brightness>
 static void cmdLedSet(char *tokens[], size_t count) {
-    // tokens[0]="led_set", [1]=ring, [2]=anim, [3]=r, [4]=g, [5]=b, [6]=brightness
     uint8_t ring;
     if (strcasecmp(tokens[1], "all") == 0) {
         ring = 0xFF;
@@ -1403,7 +1604,7 @@ static void cmdLedSet(char *tokens[], size_t count) {
         return;
     }
 
-    delay(5); // Allow LED MCU to process command
+    delay(5);
 
     uint8_t rsp;
     if (!i2c.readBytes(LED_MCU_ADDR, &rsp, 1)) {
@@ -1414,7 +1615,6 @@ static void cmdLedSet(char *tokens[], size_t count) {
     Serial.print(F("[LED] Response: ")); printLedRsp(rsp);
 }
 
-// led_status <ring>
 static void cmdLedStatus(const char *ringStr) {
     int ringVal = atoi(ringStr);
     if (ringVal < 0 || ringVal > 254) {
@@ -1451,7 +1651,6 @@ static void cmdLedStatus(const char *ringStr) {
     Serial.print(F("[LED]   Num rings:  ")); Serial.println(rsp[6]);
 }
 
-// led_config <param> <value>
 static void cmdLedConfig(const char *param, const char *valStr) {
     uint8_t paramId;
     if      (strcasecmp(param, "num_rings")     == 0) paramId = LED_CFG_NUM_RINGS;
@@ -1495,7 +1694,6 @@ static void cmdLedConfig(const char *param, const char *valStr) {
     }
 }
 
-// led_getconfig
 static void cmdLedGetconfig() {
     uint8_t cmd[1] = { LED_CMD_GET_CONFIG };
 
@@ -1532,30 +1730,136 @@ static void cmdLedGetconfig() {
 }
 
 // ============================================================================
+// Drawer-handle Commands
+// ============================================================================
+
+static void cmdDrawerLed(const char *color) {
+    if (strcasecmp(color, "off") == 0) {
+        digitalWrite(PIN_DRAWER_LED_IN1, LOW);
+        digitalWrite(PIN_DRAWER_LED_IN2, LOW);
+        Serial.println(F("[DRAWER] LED OFF (IN1=LOW, IN2=LOW)."));
+    } else if (strcasecmp(color, "red") == 0) {
+        // Drive one direction of the H-bridge; make sure other input is LOW
+        // BEFORE we raise this one (the external AND gate interlock would
+        // gate both sides LOW during the brief overlap otherwise).
+        digitalWrite(PIN_DRAWER_LED_IN2, LOW);
+        digitalWrite(PIN_DRAWER_LED_IN1, HIGH);
+        Serial.println(F("[DRAWER] LED RED (IN1=HIGH, IN2=LOW)."));
+    } else if (strcasecmp(color, "green") == 0) {
+        digitalWrite(PIN_DRAWER_LED_IN1, LOW);
+        digitalWrite(PIN_DRAWER_LED_IN2, HIGH);
+        Serial.println(F("[DRAWER] LED GREEN (IN1=LOW, IN2=HIGH)."));
+    } else {
+        Serial.println(F("[ERROR] Usage: drawer_led <off|red|green>"));
+    }
+}
+
+static void cmdDrawerButton() {
+    if (!ioExpanderExtraInit) {
+        Serial.println(F("[DRAWER] ERROR: EXTRA_IO_EXPANDER not initialized. Run 'io_init'."));
+        return;
+    }
+
+    uint8_t gpioA = 0;
+    if (!i2c.readRegister(EXTRA_IO_EXPANDER_ADDR, MCP_REG_GPIOA, gpioA)) {
+        Serial.println(F("[DRAWER] ERROR: I2C read failed."));
+        return;
+    }
+    bool pressed = (gpioA >> BIT_DRAWER_BTN) & 1;
+    Serial.print(F("[DRAWER] Button: "));
+    Serial.println(pressed ? "PRESSED" : "released");
+}
+
+// ============================================================================
+// Solenoid Commands
+// ============================================================================
+
+static bool writeTrayOlat() {
+    bool ok = true;
+    ok &= i2c.writeRegister(TRAY_IO_EXPANDER_ADDR, MCP_REG_OLATA, trayOlatA);
+    ok &= i2c.writeRegister(TRAY_IO_EXPANDER_ADDR, MCP_REG_OLATB, trayOlatB);
+    return ok;
+}
+
+static void cmdSolenoid(const char *indexStr, const char *state) {
+    if (!ioExpanderTrayInit) {
+        Serial.println(F("[SOL] ERROR: TRAY_IO_EXPANDER not initialized. Run 'io_init'."));
+        return;
+    }
+    int idx = atoi(indexStr);
+    if (idx < 0 || idx >= (int)NUM_SOLENOIDS) {
+        Serial.print(F("[ERROR] Solenoid index must be 0..")); Serial.println(NUM_SOLENOIDS - 1);
+        return;
+    }
+
+    bool turnOn;
+    if      (strcasecmp(state, "on") == 0)  turnOn = true;
+    else if (strcasecmp(state, "off") == 0) turnOn = false;
+    else { Serial.println(F("[ERROR] State must be 'on' or 'off'.")); return; }
+
+    if (idx < 8) {
+        uint8_t mask = (uint8_t)(1 << idx);
+        trayOlatA = turnOn ? (trayOlatA | mask) : (trayOlatA & (uint8_t)~mask);
+    } else {
+        uint8_t mask = (uint8_t)(1 << (idx - 8));
+        trayOlatB = turnOn ? (trayOlatB | mask) : (trayOlatB & (uint8_t)~mask);
+    }
+
+    if (!writeTrayOlat()) {
+        Serial.println(F("[SOL] ERROR: I2C write failed."));
+        return;
+    }
+
+    Serial.print(F("[SOL] SOL")); Serial.print(idx);
+    Serial.print(F(" -> ")); Serial.println(turnOn ? "ON" : "off");
+}
+
+static void cmdSolenoidAll(const char *state) {
+    if (!ioExpanderTrayInit) {
+        Serial.println(F("[SOL] ERROR: TRAY_IO_EXPANDER not initialized. Run 'io_init'."));
+        return;
+    }
+    bool turnOn;
+    if      (strcasecmp(state, "on") == 0)  turnOn = true;
+    else if (strcasecmp(state, "off") == 0) turnOn = false;
+    else { Serial.println(F("[ERROR] State must be 'on' or 'off'.")); return; }
+
+    // SOL0..SOL7 are GPA0..GPA7; SOL8..SOL11 are GPB0..GPB3.
+    trayOlatA = turnOn ? 0xFF : 0x00;
+    trayOlatB = (trayOlatB & 0xF0) | (turnOn ? 0x0F : 0x00);
+
+    if (!writeTrayOlat()) {
+        Serial.println(F("[SOL] ERROR: I2C write failed."));
+        return;
+    }
+
+    Serial.print(F("[SOL] All 12 solenoids -> "));
+    Serial.println(turnOn ? "ON" : "off");
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
 static TMC2209 *lookupTmc(const char *motor) {
-    if (strcasecmp(motor, "x") == 0)  return &tmcX;
-    if (strcasecmp(motor, "y") == 0)  return &tmcY;
     if (strcasecmp(motor, "z1") == 0) return &tmcZ1;
     if (strcasecmp(motor, "z2") == 0) return &tmcZ2;
+    if (strcasecmp(motor, "m3") == 0) return &tmcM3;
     return nullptr;
 }
 
 static bool isTmcInitialized(const char *motor) {
-    if (strcasecmp(motor, "x") == 0)  return tmcXInitialized;
-    if (strcasecmp(motor, "y") == 0)  return tmcYInitialized;
     if (strcasecmp(motor, "z1") == 0) return tmcZ1Initialized;
     if (strcasecmp(motor, "z2") == 0) return tmcZ2Initialized;
+    if (strcasecmp(motor, "m3") == 0) return tmcM3Initialized;
     return false;
 }
 
 static void getAxisPins(const char *axis, uint8_t &stepPin, uint8_t &dirPin,
-                        uint8_t &enablePin, bool &valid) {
+                        bool &valid) {
     valid = true;
-    if      (strcasecmp(axis, "x") == 0) { stepPin = PIN_X_STEP; dirPin = PIN_X_DIR; enablePin = PIN_X_NENABLE; }
-    else if (strcasecmp(axis, "y") == 0) { stepPin = PIN_Y_STEP; dirPin = PIN_Y_DIR; enablePin = PIN_Y_NENABLE; }
-    else if (strcasecmp(axis, "z") == 0) { stepPin = PIN_Z_STEP; dirPin = PIN_Z_DIR; enablePin = PIN_Z_NENABLE; }
+    if      (strcasecmp(axis, "z1") == 0) { stepPin = PIN_Z1_STEP; dirPin = PIN_Z1_DIR; }
+    else if (strcasecmp(axis, "z2") == 0) { stepPin = PIN_Z2_STEP; dirPin = PIN_Z2_DIR; }
+    else if (strcasecmp(axis, "m3") == 0) { stepPin = PIN_M3_STEP; dirPin = PIN_M3_DIR; }
     else { valid = false; }
 }
