@@ -2,8 +2,8 @@
 // LED MCU Firmware — NeoPixel Ring Animation Engine
 // ============================================================================
 //
-// Target: ATSAMD21E17A (Adafruit Trinket M0 pinout, 128KB flash / 16KB RAM)
-//         Modified Trinket M0 UF2 bootloader (E17A variant) at 0x0000–0x1FFF.
+// Target: ATSAMD21E18A (Adafruit Trinket M0, 256KB flash / 32KB RAM)
+//         Stock Trinket M0 UF2 bootloader at 0x0000–0x1FFF.
 //         Upload via PlatformIO (bossac/SAM-BA) or drag .uf2 onto UF2 drive.
 //
 // This MCU offloads NeoPixel timing from the main MCU. It runs autonomously,
@@ -521,7 +521,7 @@ static void processCommand(char *line) {
 
     // --- info ---
     else if (strcasecmp(tokens[0], "info") == 0) {
-        Serial.println(F("[INFO] LED MCU — ATSAMD21E17A (Trinket M0 pinout)"));
+        Serial.println(F("[INFO] LED MCU — ATSAMD21E18A (Trinket M0)"));
         Serial.print(F("[INFO] I2C slave address: 0x"));
         Serial.println(I2C_ADDR, HEX);
         Serial.print(F("[INFO] NeoPixel pin: D"));

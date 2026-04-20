@@ -1,99 +1,40 @@
 # LED MCU Firmware
 
-NeoPixel ring animation engine for the **ATSAMD21E17A** (Trinket M0 pinout,
-128KB flash / 16KB RAM), controlled via I2C by the main MCU (ATSAMD51J19A).
+NeoPixel ring animation engine for the **ATSAMD21E18A** (Adafruit Trinket M0,
+256KB flash / 32KB RAM), controlled via I2C by the main MCU (ATSAMD51J19A).
 
 ## Hardware
 
 | Pin | Function | Description |
 |-----|----------|-------------|
-| D0 (PA08) | I2C SDA | Shared bus with main MCU and MCP23017 |
+| D0 (PA08) | I2C SDA | Shared bus with main MCU |
 | D1 (PA02) | NeoPixel data | Level-shifted 3.3V ↔ 5V on PCB |
-| D2 (PA09) | I2C SCL | Shared bus with main MCU and MCP23017 |
+| D2 (PA09) | I2C SCL | Shared bus with main MCU |
 
-- **MCU:** ATSAMD21E17A (128KB flash, 16KB RAM)
+- **MCU:** ATSAMD21E18A (256KB flash, 32KB RAM)
 - **I2C slave address:** `0x30`
 - **Default config:** 2 rings × 12 LEDs each (24 LEDs total)
 - **Max supported:** 8 rings, 64 LEDs total
 
 ## Bootloader
 
-The stock Adafruit Trinket M0 bootloader (`bootloader-trinket_m0-v3.16.0.bin`)
-targets the ATSAMD21E18A (256KB flash). It will **not work** on the E17A because
-the UF2 mass storage driver tries to expose 256KB of flash that doesn't exist.
-
-A custom-built UF2 bootloader for the E17A is included:
-
-```
-bootloader/bootloader-trinket_m0_e17a.bin
-```
-
-### Flashing the bootloader
-
-Use an ATMEL ICE or other SWD programmer to flash the bootloader binary to
-address 0x00000000:
-
-```bash
-# Via OpenOCD
-openocd -f interface/cmsis-dap.cfg -f target/at91samdXX.cfg \
-  -c "program bootloader/bootloader-trinket_m0_e17a.bin 0x00000000 verify reset exit"
-
-# Via Atmel Studio
-# Device: ATSAMD21E17A, program the .bin at offset 0x0
-```
-
-After flashing, double-tap the reset button. You should see a `TRINKETBOOT`
-USB mass storage drive appear — that confirms the bootloader is working.
-
-### What was changed from stock
-
-The bootloader was built from the [Adafruit UF2 SAMD source](https://github.com/adafruit/uf2-samdx1)
-with a custom board definition (`boards/trinket_m0_e17a/`):
-
-- `board.mk`: `CHIP_VARIANT = SAMD21E17A` (was `SAMD21E18A`)
-- `board_config.h`: `FLASH_NUM_ROWS = 512` (was 1024)
-- Linker script: RAM reduced from 32KB to 16KB
-- Makefile: `LINKER_SCRIPT` changed from `=` to `?=` to allow board override
+The stock Adafruit Trinket M0 bootloader
+(`bootloader-trinket_m0-v3.16.0.bin`) is used as-is. Flash via ATMEL ICE or
+another SWD programmer to address `0x00000000`, then double-tap the reset
+button — you should see a `TRINKETBOOT` USB mass storage drive appear.
 
 ## Building and Uploading
 
 ```bash
 pio run                    # Build
-pio run -t upload          # Upload via sam-ba (same as main MCU)
+pio run -t upload          # Upload via sam-ba
 ```
 
-Upload works identically to the main MCU: PlatformIO sends a 1200bps reset
-to trigger the bootloader, then flashes via bossac.
-
-**Note:** PlatformIO only auto-upgrades bossac for SAMD51 boards. Since this
-is a SAMD21 with a UF2 bootloader, `platformio.ini` forces bossac 1.9 and
-`fix_upload.py` overrides the upload flags to include `--offset 0x2000`
-(matching the SAMD51 code path). Without this, bossac 1.7's legacy flags are
-incompatible with the UF2 bootloader.
-
-### Manual upload (no PlatformIO needed)
-
-For end users without PlatformIO:
+### Manual upload
 
 1. Double-tap the reset button on the LED MCU
 2. A `TRINKETBOOT` USB drive will appear
-3. Drag and drop a `firmware.uf2` file onto the drive
-4. The board will automatically flash and restart
-
-To generate a `.uf2` from a `.bin`, use Microsoft's
-[uf2conv.py](https://github.com/microsoft/uf2/blob/master/utils/uf2conv.py):
-
-```bash
-python3 uf2conv.py -c -f SAMD21 -b 0x2000 -o firmware.uf2 firmware.bin
-```
-
-### SWD upload (development)
-
-```ini
-# Replace upload lines in platformio.ini with:
-upload_protocol = atmel-ice
-debug_tool = atmel-ice
-```
+3. Drag and drop `firmware.uf2` onto the drive
 
 ## Animations
 

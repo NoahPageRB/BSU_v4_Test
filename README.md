@@ -21,8 +21,8 @@ to verify the programmer is connected
 minipro -p AT24C02C -w 2513.bin
 
 Connect USB C cable to laptop
-Ensure you see the RS232 on the COM port (VS Code little port button shows you drop downs)
-If you want to use VS Code for this you need to open into the ATSAMD51J19A folder, not the PSU_v4_Test folder, since PlatformIO needs to see the platform.ini file in the top level directory for the COM checker to appear
+Ensure you see the device COM port (VS Code little port button shows you drop downs)
+If you want to use VS Code for this you need to open into the ATSAMD51J19A folder, not the BSU_v4_Test folder, since PlatformIO needs to see the platformio.ini file in the top level directory for the COM checker to appear
 
 Power off
 Must use Windows for this next part
@@ -57,132 +57,154 @@ Open your favorite serial monitor to the M4 @115200, VS Code or Arduino
 Send the following commands
 help
 Ensure you get a response
-We will test the 4 motors first.
-Connect stepper motor to x axis following wiring harness schematic
-tmc_init x
-you may have to send the init twice, still figuring that timing out
-tmc_microstep x 8
-tmc_current x 50
-tmc_enable x
-enable x
-step x 1600 2000
-Motor should make a full rotation.
-disable x
-Move motor to Y.
-tmc_init y
-tmc_microstep y 8
-tmc_current y 50
-tmc_enable y
-enable y
-step y 1600 2000
-Motor should make a full rotation.
-disable y
-Move motor to Z1.
+
+Next, run io_init so the expanders come up (motor enables live on the
+EXTRA_IO_EXPANDER now, not direct MCU GPIO):
+io_init
+
+We will test the 3 motors first. BSU has three motor axes: Z1, Z2, M3.
+Z1 and Z2 have independent STEP / DIR / UART but SHARE a common EN line on
+GPA6 of the EXTRA expander (they drive the same physical gantry, like the
+two Z motors on a Prusa). M3 has its own EN on GPA7. The enable CLI
+therefore exposes only 'z' and 'm3' as canonical axes; 'z1'/'z2' are
+accepted as aliases for 'z' so the rest of the CLI stays symmetric.
+Connect stepper motor to Z1 port following wiring harness schematic
 tmc_init z1
+you may have to send the init twice, still figuring that timing out
 tmc_microstep z1 8
 tmc_current z1 50
 tmc_enable z1
 enable z
-step z 1600 2000
+step z1 1600 2000
 Motor should make a full rotation.
-disable z
-Move motor to Z2
+Move motor to Z2 (leave 'z' enabled — same pin drives both).
 tmc_init z2
 tmc_microstep z2 8
 tmc_current z2 50
 tmc_enable z2
-enable z
-step z 1600 2000
+step z2 1600 2000
 Motor should make a full rotation.
 disable z
+Move motor to M3.
+tmc_init m3
+tmc_microstep m3 8
+tmc_current m3 50
+tmc_enable m3
+enable m3
+step m3 1600 2000
+Motor should make a full rotation.
+disable m3
 
 Power off, next we swap the STEP / DIR lines to the TMC429 for scheduled testing
+io_init
 mc_init
-Connect motor to x
-tmc_init x
-tmc_microstep x 8
-tmc_current x 50
-tmc_enable x
-mc_limits x 100 1000 1000
-enable x
-mc_velocity x
-mc_vtarget x 1000
-motor should move
-disable x
-Connect motor to y
-tmc_init y
-tmc_microstep y 8
-tmc_current y 50
-tmc_enable y
-mc_limits y 100 1000 1000
-enable y
-mc_velocity y
-mc_vtarget y 1000
-motor should move
-disable y
-Connect motor to z1 port
+Connect motor to z1
 tmc_init z1
 tmc_microstep z1 8
 tmc_current z1 50
 tmc_enable z1
-mc_limits z 100 1000 1000
-enable z
-mc_velocity z
-mc_vtarget z 1000
+mc_limits z1 100 1000 1000
+enable z1
+mc_velocity z1
+mc_vtarget z1 1000
 motor should move
-disable z
-Connect motor to z2 port
+disable z1
+Connect motor to z2
 tmc_init z2
 tmc_microstep z2 8
 tmc_current z2 50
 tmc_enable z2
-mc_limits z 100 1000 1000
-enable z
-mc_velocity z
-mc_vtarget z 1000
+mc_limits z2 100 1000 1000
+enable z2
+mc_velocity z2
+mc_vtarget z2 1000
 motor should move
-disable z
+disable z2
+Connect motor to m3 port
+tmc_init m3
+tmc_microstep m3 8
+tmc_current m3 50
+tmc_enable m3
+mc_limits m3 100 1000 1000
+enable m3
+mc_velocity m3
+mc_vtarget m3 1000
+motor should move
+disable m3
 
 Next we will check the limit switch status for both MCU and TMC429
 io_init
 mc_swpol high
 mc_rightsw on
 io_read
-See all LOW and all OPEN
+See all switches open and motor EN lines HIGH (disabled, active-LOW signaling)
 mc_switches
 See all inactive
-Take a jumper and bridge the ZEND2 sensor connector high (connect the middle pin to the pin furthest from the top of the board)
+Take a jumper and bridge the Z_TOP sensor connector high (connect the middle pin to the pin furthest from the top of the board)
 io_read
-See ZEND2 TRIGGERED and rest open
+See Z_TOP TRIGGERED and rest open
 mc_switches
-See ZEND2 ACTIVE and rest inactive
-Remove jumper on ZEND2, and repeat the process for ZEND1, YEND2, YEND1, XEND2, and XEND1
+See z1 and/or z2 ACTIVE (Z_TOP is shared between z1 and z2), rest inactive
+Remove jumper on Z_TOP, and repeat the process for Z_BOT, SPARE_TOP, and SPARE_BOT.
+SPARE_TOP and SPARE_BOT feed only the m3 TMC429 motor.
+
+Next we test the drawer handle. Connect the drawer-handle harness (button +
+bi-color LED) and verify the button and both LED colors:
+drawer_button
+Press the drawer button while repeatedly running this command — it should
+report PRESSED while you hold it and released when you let go.
+drawer_led red
+LED on the drawer handle should light RED
+drawer_led green
+LED on the drawer handle should light GREEN
+drawer_led off
+LED should turn off
+
+Next we test the 12 solenoid outputs on TRAY_IO_EXPANDER @ 0x20. The CLI
+index walks in tray/valve order:
+  sol 0..3  -> T1V1..T1V4 (Tray 1, Valves 1-4)
+  sol 4..7  -> T2V1..T2V4 (Tray 2, Valves 1-4)
+  sol 8..11 -> T3V1..T3V4 (Tray 3, Valves 1-4)
+Test them one at a time — move a single test solenoid (or listen for the
+click / LED on a test harness) between the 12 ports:
+sol 0 on
+Verify T1V1 fired
+sol 0 off
+Move the test solenoid to T1V2.
+sol 1 on
+...repeat through sol 11 / T3V4. You can also drive all at once with:
+sol_all on
+sol_all off
+(Careful with total current draw if you do drive all 12 simultaneously.)
 power off
 
 Next we will flash the bootloader to the LED MCU
 Connect ATMEL ICE to LED MCU watching orientation
-Go through the exact same steps as before, except select the correct LED MCU. The design for v4 calls for the ATSAMD21E18A,
-but due to inventory shortages some boards may have an ATSAMD21E17A. Visually confirm on the MCU the right one, and proceed.
-For ATSAMD21E18A, flash bootloader-trinket_m0-v3.16.0.bin. For ATSAMD21E17A, flash bootloader-trinket_m9_e17a.bin.
+Go through the exact same steps as before, except select the correct LED MCU.
+The BSU design calls for the ATSAMD21E18A — flash bootloader-trinket_m0-v3.16.0.bin.
 Power off, connect USB C to board, then power on.
-Open VSCode to ATSAMD21E17A (Regardless of if you are running the 17 or 18 version).
-You should see a new com port, for Trinket M0, select it.
-Due to the reduced memory of the 17A, we can't use the normal upload button via bossa like we do on the main MCU. If you are on the 18A, you can just upload like we did on the Main MCU and skip the below steps. But the below approach works for 17 or 18, so you if you aren't feeling adventurous you can just follow the instructions below. 
+Open VSCode to the ATSAMD21E18A folder.
+You should see a new COM port for Trinket M0; select it.
 Double tap the reset button at the bottom of the board.
-You should see a flash drive called TRINKETBOOT on your PC. You may have to try the double tap reset a few times to get this to work.
-Press the trash can icon in the bottom left to clean the build artifacts
-Press the checkmark icon in the bottom left to build without uploading
-In the ATSAMD21E17A folder, go to .pio/build/trinket_m0.
-Drag and drop the firmware.uf2 file onto the TRINKETBOOT flashdrive. The flashdrive should immediately disconnect
+You should see a flash drive called TRINKETBOOT on your PC. You may have to
+try the double tap reset a few times to get this to work.
+Either press the upload button to flash via bossa, or drag and drop the
+firmware.uf2 file (in ATSAMD21E18A/.pio/build/trinket_m0/) onto the
+TRINKETBOOT flashdrive. The flashdrive should immediately disconnect.
 Press the reset button on the bottom of the board just one time.
-Connect via your favorite serial monitor to this trinket COM port via 115200 baud. If you don't see it you can try single press reset, just don't double click it.
+Connect via your favorite serial monitor to this trinket COM port via 115200
+baud. If you don't see it you can try single press reset, just don't double
+click it.
 
 make sure LEDs are connected to the LED port
-set all spin 0 255 0 255
 disconnect and switch your serial to the main MCU port
 led_set all spin 255 0 0 255
-the LEDs should turn on
+the LEDs should turn on (red spin animation)
+led_set all off 0 0 0 0
+LEDs off
 
-Lastly we test the RS232 port. Connect a USB to RS232 adapter to the RS232 port. Open a serial 115200 for the usbserial port on the PCB, and another serial for your USB to RS232 adapter. Send a message on one side, ensure it shows up on the other.
+Automated alternative: the Python test script `bsu_test.py` drives the whole
+procedure interactively, writing a JSON log. Requires `pip install pyserial`:
+python bsu_test.py
 
 We are all done! Write a serial number under the Resolve logo.
