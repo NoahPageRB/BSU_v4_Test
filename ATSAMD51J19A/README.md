@@ -13,14 +13,20 @@ provides interactive control and diagnostics for the BSU v4 PCB:
 
 ### Motors
 
-| Motor | STEP | DIR | nEnable (expander) | TMC2209 UART    | SERCOM            |
-|-------|------|-----|--------------------|-----------------|-------------------|
-| Z1    | A1   | A0  | EXTRA GPA4         | TX=D13, RX=D12  | SERCOM1           |
-| Z2    | A3   | A2  | EXTRA GPA5         | TX=D3,  RX=D2   | SERCOM5           |
-| M3    | A5   | A4  | EXTRA GPA6         | TX=D1,  RX=D0   | SERCOM3 (Serial1) |
+| Motor | STEP | DIR | Enable (expander)          | TMC2209 UART    | SERCOM            |
+|-------|------|-----|----------------------------|-----------------|-------------------|
+| Z1    | A1   | A0  | EXTRA GPA6 (**shared** Z)  | TX=D13, RX=D12  | SERCOM1           |
+| Z2    | A5   | A4  | EXTRA GPA6 (**shared** Z)  | TX=D3,  RX=D2   | SERCOM5           |
+| M3    | A3   | A2  | EXTRA GPA7                 | TX=D1,  RX=D0   | SERCOM3 (Serial1) |
 
-All three motors are fully independent: each has its own STEP, DIR, nEnable,
-and TMC2209 UART. Unlike the PSU, no STEP/DIR lines are shared.
+Z1 and Z2 have independent STEP / DIR / UART but drive the same physical
+gantry (like a Prusa Z), so they share a single enable line on GPA6.
+M3 has its own enable on GPA7.
+
+Enable lines run straight from the MCP23017 to the TMC2209's EN pin, which
+is active-LOW. LOW = driver enabled, HIGH = driver disabled (safe boot state).
+The pin names `MCU_Z_EN` / `MCU_M3_EN` are a labeling shorthand — treat them
+as active-LOW.
 
 ### STEP/DIR Source Selection
 
@@ -61,33 +67,48 @@ pushbutton.
 
 | Pin  | Direction | Signal       | Description                                 |
 |------|-----------|--------------|---------------------------------------------|
-| GPA0 | In        | Z1 DIAG      | TMC2209 DIAG output for Z1                  |
-| GPA1 | In        | Z2 DIAG      | TMC2209 DIAG output for Z2                  |
-| GPA2 | In        | M3 DIAG      | TMC2209 DIAG output for M3                  |
-| GPA3 | In        | *(unused)*   | —                                           |
-| GPA4 | **Out**   | Z1 nEN       | HIGH = driver disabled (default at boot)    |
-| GPA5 | **Out**   | Z2 nEN       | HIGH = driver disabled (default at boot)    |
-| GPA6 | **Out**   | M3 nEN       | HIGH = driver disabled (default at boot)    |
-| GPA7 | In        | DRAWER_BTN   | Drawer-handle pushbutton                    |
-| GPB0 | In        | Z_TOP        | Z1/Z2 shared top limit switch               |
-| GPB1 | In        | Z_BOT        | Z1/Z2 shared bottom limit switch            |
-| GPB2 | In        | SPARE_TOP    | M3 top limit switch                         |
-| GPB3 | In        | SPARE_BOT    | M3 bottom limit switch                      |
-| GPB4-7 | In      | *(unused)*   | —                                           |
+| GPA0 | In        | Z_BOT        | Z1/Z2 shared bottom limit switch            |
+| GPA1 | In        | SPARE_TOP    | M3 top limit switch                         |
+| GPA2 | In        | SPARE_BOT    | M3 bottom limit switch                      |
+| GPA3 | In        | Z1 DIAG      | TMC2209 DIAG output for Z1                  |
+| GPA4 | In        | Z2 DIAG      | TMC2209 DIAG output for Z2                  |
+| GPA5 | In        | M3 DIAG      | TMC2209 DIAG output for M3                  |
+| GPA6 | **Out**   | MCU_Z_EN     | Shared enable for Z1+Z2 (active-LOW)        |
+| GPA7 | **Out**   | MCU_M3_EN    | Enable for M3 (active-LOW)                  |
+| GPB0 | In        | DRAWER_SW    | Drawer-handle switch                        |
+| GPB1 | In        | T1SW1        | Tray 1 switch 1                             |
+| GPB2 | In        | T1SW2        | Tray 1 switch 2                             |
+| GPB3 | In        | T2SW1        | Tray 2 switch 1                             |
+| GPB4 | In        | T2SW2        | Tray 2 switch 2                             |
+| GPB5 | In        | T3SW1        | Tray 3 switch 1                             |
+| GPB6 | In        | T3SW2        | Tray 3 switch 2                             |
+| GPB7 | In        | Z_TOP        | Z1/Z2 shared top limit switch               |
 
-During `io_init`, the OLAT register is written **before** IODIR so the nEN
-outputs never briefly pulse LOW (which would momentarily enable motors) when
-the pins transition from input to output.
+During `io_init`, the OLAT register is written **before** IODIR so the EN
+outputs never briefly pulse to the enabled polarity (which would momentarily
+enable motors) when the pins transition from input to output.
 
 #### TRAY_IO_EXPANDER — I2C 0x20 (A2=A1=A0=GND)
 
-12 solenoid outputs. Solenoids are driven HIGH to fire; default all OFF.
+12 solenoid outputs, organized by tray (3 trays × 4 valves). Solenoids are
+driven HIGH to fire; default all OFF. The `sol <0..11>` CLI index walks in
+physical tray/valve order (T1V1..T3V4), not in expander pin order.
 
-| Pin    | Direction | Signal        |
-|--------|-----------|---------------|
-| GPA0-7 | **Out**   | SOL0 – SOL7   |
-| GPB0-3 | **Out**   | SOL8 – SOL11  |
-| GPB4-7 | In        | *(unused)*    |
+| Pin    | Direction | Signal        | CLI    |
+|--------|-----------|---------------|--------|
+| GPB0   | **Out**   | T1V1          | sol 0  |
+| GPB1   | **Out**   | T1V2          | sol 1  |
+| GPB2   | **Out**   | T1V3          | sol 2  |
+| GPB3   | **Out**   | T1V4          | sol 3  |
+| GPB4   | **Out**   | T2V1          | sol 4  |
+| GPB5   | **Out**   | T2V2          | sol 5  |
+| GPB6   | **Out**   | T2V3          | sol 6  |
+| GPB7   | **Out**   | T2V4          | sol 7  |
+| GPA0   | **Out**   | T3V1          | sol 8  |
+| GPA1   | **Out**   | T3V2          | sol 9  |
+| GPA2   | **Out**   | T3V3          | sol 10 |
+| GPA3   | **Out**   | T3V4          | sol 11 |
+| GPA4-7 | In        | *(nc)*        | —      |
 
 ### Drawer-Handle Bi-color LED (DRV8231A H-bridge)
 
@@ -154,15 +175,20 @@ Connect at **115200 baud** over USB serial. Commands are case-insensitive.
 
 ---
 
-### Motor Enable / Disable (via EXTRA_IO_EXPANDER GPA4..GPA6)
+### Motor Enable / Disable (via EXTRA_IO_EXPANDER GPA6..GPA7)
 
-| Command                   | Description |
-|---------------------------|-------------|
-| `enable <z1\|z2\|m3>`     | Clear nEnable bit (driver ON) |
-| `disable <z1\|z2\|m3>`    | Set nEnable bit (driver OFF) |
+| Command                | Description |
+|------------------------|-------------|
+| `enable <z\|m3>`       | Drive EN active (driver ON) |
+| `disable <z\|m3>`      | Drive EN inactive (driver OFF) |
 
-Motors are **disabled** at boot (all three nEN bits HIGH). Run `io_init` and
-then `enable` before expecting any motion.
+Motors are **disabled** at boot (both EN bits HIGH, since active-LOW). Run
+`io_init` and then `enable` before expecting any motion.
+
+Z1 and Z2 share a single EN line on GPA6, so the canonical form is
+`enable z` / `disable z`. `z1` and `z2` are accepted as aliases for `z`
+(CLI muscle memory and the Python tester use them), but all three select
+the same pin.
 
 ---
 
@@ -262,7 +288,7 @@ Control the LED MCU (ATSAMD21E18A) over I2C. See
 | Command | Description |
 |---------|-------------|
 | `drawer_led <off\|red\|green>` | Drive bi-color LED via the DRV8231A H-bridge. |
-| `drawer_button` | Read the drawer pushbutton (via EXTRA_IO_EXPANDER GPA7). |
+| `drawer_button` | Read the drawer pushbutton (via EXTRA_IO_EXPANDER GPB0). |
 
 ---
 

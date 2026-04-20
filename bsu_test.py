@@ -771,6 +771,7 @@ def test_drawer(sp):
 def test_solenoids(sp):
     print_header("Section 7: Solenoid Test")
     print_info("Each of the 12 solenoid ports is tested individually.")
+    print_info("Order: Tray 1 valves 1-4, then Tray 2 valves 1-4, then Tray 3 valves 1-4.")
     print_info("You'll be prompted to move a test solenoid between ports.")
     wait_for_enter("Press [Enter] when ready...")
 
@@ -783,21 +784,24 @@ def test_solenoids(sp):
     sp.send_command("sol_all off")
 
     for idx in range(NUM_SOLENOIDS):
-        print_subheader(f"Solenoid SOL{idx}")
-        wait_for_enter(f"Connect the test solenoid to port SOL{idx}, then press [Enter]...")
+        tray  = (idx // 4) + 1
+        valve = (idx % 4) + 1
+        label = f"T{tray}V{valve}"
+        print_subheader(f"Solenoid {label} (sol {idx}) — Tray {tray}, Valve {valve}")
+        wait_for_enter(f"Connect the test solenoid to port {label}, then press [Enter]...")
 
         lines = sp.send_command(f"sol {idx} on")
         ok = expect_ok(lines, keyword=f"SOL{idx}")
-        if not check_and_log("SOLENOIDS", f"sol_{idx}_on_cmd", ok, lines):
+        if not check_and_log("SOLENOIDS", f"sol_{idx}_{label}_on_cmd", ok, lines):
             return False
 
-        user_ok = ask_user(f"Did solenoid SOL{idx} fire (click / actuate)?")
+        user_ok = ask_user(f"Did solenoid {label} fire (click / actuate)?")
         sp.send_command(f"sol {idx} off")
-        if not check_and_log("SOLENOIDS", f"user_confirm_sol_{idx}", user_ok,
+        if not check_and_log("SOLENOIDS", f"user_confirm_{label}", user_ok,
                              ["user response"]):
             return False
 
-    print_pass("All 12 solenoid tests complete.")
+    print_pass("All 12 solenoid tests complete (T1V1..T3V4).")
     return True
 
 

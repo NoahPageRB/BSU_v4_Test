@@ -62,26 +62,29 @@ Next, run io_init so the expanders come up (motor enables live on the
 EXTRA_IO_EXPANDER now, not direct MCU GPIO):
 io_init
 
-We will test the 3 motors first. BSU has three independent axes: Z1, Z2, M3.
+We will test the 3 motors first. BSU has three motor axes: Z1, Z2, M3.
+Z1 and Z2 have independent STEP / DIR / UART but SHARE a common EN line on
+GPA6 of the EXTRA expander (they drive the same physical gantry, like the
+two Z motors on a Prusa). M3 has its own EN on GPA7. The enable CLI
+therefore exposes only 'z' and 'm3' as canonical axes; 'z1'/'z2' are
+accepted as aliases for 'z' so the rest of the CLI stays symmetric.
 Connect stepper motor to Z1 port following wiring harness schematic
 tmc_init z1
 you may have to send the init twice, still figuring that timing out
 tmc_microstep z1 8
 tmc_current z1 50
 tmc_enable z1
-enable z1
+enable z
 step z1 1600 2000
 Motor should make a full rotation.
-disable z1
-Move motor to Z2.
+Move motor to Z2 (leave 'z' enabled — same pin drives both).
 tmc_init z2
 tmc_microstep z2 8
 tmc_current z2 50
 tmc_enable z2
-enable z2
 step z2 1600 2000
 Motor should make a full rotation.
-disable z2
+disable z
 Move motor to M3.
 tmc_init m3
 tmc_microstep m3 8
@@ -134,7 +137,7 @@ io_init
 mc_swpol high
 mc_rightsw on
 io_read
-See all open and motor nENs HIGH (disabled)
+See all switches open and motor EN lines HIGH (disabled, active-LOW signaling)
 mc_switches
 See all inactive
 Take a jumper and bridge the Z_TOP sensor connector high (connect the middle pin to the pin furthest from the top of the board)
@@ -157,15 +160,19 @@ LED on the drawer handle should light GREEN
 drawer_led off
 LED should turn off
 
-Next we test the 12 solenoid outputs on TRAY_IO_EXPANDER @ 0x20. Test them one
-at a time — move a single test solenoid (or listen for the click / LED on a
-test harness) between the 12 ports:
+Next we test the 12 solenoid outputs on TRAY_IO_EXPANDER @ 0x20. The CLI
+index walks in tray/valve order:
+  sol 0..3  -> T1V1..T1V4 (Tray 1, Valves 1-4)
+  sol 4..7  -> T2V1..T2V4 (Tray 2, Valves 1-4)
+  sol 8..11 -> T3V1..T3V4 (Tray 3, Valves 1-4)
+Test them one at a time — move a single test solenoid (or listen for the
+click / LED on a test harness) between the 12 ports:
 sol 0 on
-Verify SOL0 fired
+Verify T1V1 fired
 sol 0 off
-Move the test solenoid to SOL1.
+Move the test solenoid to T1V2.
 sol 1 on
-...repeat for SOL2 through SOL11. You can also drive all at once with:
+...repeat through sol 11 / T3V4. You can also drive all at once with:
 sol_all on
 sol_all off
 (Careful with total current draw if you do drive all 12 simultaneously.)
