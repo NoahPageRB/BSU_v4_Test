@@ -37,9 +37,9 @@ MOTOR_STEP_COUNT = 1600
 MOTOR_STEP_DELAY_US = 2000
 
 TMC429_VMIN = 100
-TMC429_VMAX = 1000
-TMC429_AMAX = 1000
-TMC429_VTARGET = 1000
+TMC429_VMAX = 500
+TMC429_AMAX = 500
+TMC429_VTARGET = 500
 
 # BSU has 3 independent motors; each has its own STEP/DIR/UART/ENABLE.
 MOTORS = ["z1", "z2", "m3"]
@@ -197,38 +197,36 @@ class SerialPort:
         finally:
             self.ser.timeout = old_timeout
 
+    # Prompt terminator. The firmware writes "> " with no trailing newline,
+    # but it always emits a "\n" immediately before the prompt (the previous
+    # command output ends with println). Matching on "\n> " avoids false
+    # positives from usage strings like "tmc_init <z1|z2|m3> [baud]".
+    _PROMPT_TERMINATOR = b"\n> "
+
     def read_until_prompt(self, timeout=None):
         """
-        Read lines until the '> ' prompt or timeout. Returns all lines collected.
-        The prompt line itself is not included.
+        Read bytes until the firmware emits its '\\n> ' prompt or timeout.
+        Returns lines collected before the prompt; the prompt itself is not
+        included.
+
+        Uses pyserial's read_until() so we don't pay a full readline()
+        timeout waiting for a newline that never arrives at the prompt.
         """
         if timeout is None:
             timeout = self.timeout
-        lines = []
-        deadline = time.time() + timeout
         old_timeout = self.ser.timeout
         try:
-            while time.time() < deadline:
-                remaining = max(0.1, deadline - time.time())
-                self.ser.timeout = remaining
-                raw = self.ser.readline()
-                if not raw:
-                    continue
-                line = raw.decode("ascii", errors="replace").rstrip("\r\n")
-                stripped = line.strip()
-                if stripped == ">":
-                    break
-                if line == "> " or line == ">":
-                    break
-                if line.endswith("\n> ") or line.endswith("\r> "):
-                    content = line[:-2].strip()
-                    if content:
-                        lines.append(content)
-                    break
-                lines.append(line)
+            self.ser.timeout = timeout
+            raw = self.ser.read_until(self._PROMPT_TERMINATOR)
         finally:
             self.ser.timeout = old_timeout
-        return lines
+        text = raw.decode("ascii", errors="replace")
+        # Drop the trailing "\n> " prompt if present.
+        if text.endswith("\n> "):
+            text = text[:-3]
+        # Split into lines, stripping CR/LF and dropping empties.
+        lines = [ln.rstrip("\r") for ln in text.split("\n")]
+        return [ln for ln in lines if ln]
 
     def send_command(self, cmd, timeout=None):
         if timeout is None:
