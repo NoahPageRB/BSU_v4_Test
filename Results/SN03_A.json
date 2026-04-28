@@ -1,0 +1,168 @@
+{
+  "timestamp": "2026-04-27T20:39:41.333408",
+  "overall": "PASS",
+  "summary": {
+    "total": 26,
+    "passed": 26,
+    "failed": 0,
+    "skipped": 0
+  },
+  "results": [
+    {
+      "section": "BASIC_COMMS",
+      "step": "help_response",
+      "status": "PASS",
+      "raw": "help\n\n===================== AVAILABLE COMMANDS =====================\n\n--- General ---\n  help                                  Show this help text\n\n--- I/O Expanders (MCP23017 @ 0x20 + 0x21) ---\n  io_init                               Initialize both MCP23017s\n  io_reset                              Hardware-reset both MCP23017s\n  io_read                               Read all expander inputs\n\n--- MCU Pin Readback ---\n  mcu_read                              Read all MCU output pin states\n\n--- Motor Enable/Disable (via EXTRA_IO_EXPANDER GPA6..GPA7) ---\n  enable  <z|m3>                        Drive EN active (driver ON)\n  disable <z|m3>                        Drive EN inactive (driver OFF)\n                                        Z1 and Z2 share a single EN line;\n                                        'z1'/'z2' are accepted as aliases for 'z'.\n\n--- TMC2209 UART ---\n  tmc_init       <z1|z2|m3> [baud]      Init UART (default 115200)\n  tmc_status     <z1|z2|m3>             Read TMC2209 status/settings\n  tmc_current    <z1|z2|m3> <percent>   Set run current (0-100%)\n  tmc_hold       <z1|z2|m3> <percent>   Set hold current (0-100%)\n  tmc_microstep  <z1|z2|m3> <n>         Set microsteps (1..256)\n  tmc_stealthchop <z1|z2|m3> <on|off>   Toggle StealthChop mode\n  tmc_enable     <z1|z2|m3>             Software-enable via UART\n  tmc_disable    <z1|z2|m3>             Software-disable via UART\n\n--- Direct Pin Control ---\n  dir  <z1|z2|m3> <0|1>                 Set direction pin level\n  step <z1|z2|m3> <count> <delay_us>    Pulse STEP pin <count> times\n\n--- TMC429 Motion Controller (mc_) ---\n  mc_init [clock_mhz]                   Init SPI + TMC429 (default 32)\n  mc_status                             Read version + status flags\n  mc_limits <z1|z2|m3> <vmin> <vmax> <amax>\n                                        Set limits (all Hz or Hz/s)\n  mc_ramp <z1|z2|m3>                    Ramp mode (position w/ trapezoid)\n  mc_velocity <z1|z2|m3>                Velocity mode (continuous)\n  mc_hold <z1|z2|m3>                    Hold mode (lock position)\n  mc_target <z1|z2|m3> <position>       Set target position (ramp mode)\n  mc_vtarget <z1|z2|m3> <velocity_hz>   Set target velocity (vel mode)\n  mc_pos <z1|z2|m3>                     Read actual + target position\n  mc_setpos <z1|z2|m3> <position>       Write actual position register\n  mc_stop <z1|z2|m3>                    Stop one axis\n  mc_stopall                            Stop all three axes\n  mc_switches                           Read all limit switch states\n  mc_swpol <high|low>                   Set switch active polarity\n  mc_leftstop <z1|z2|m3> <on|off>       Left switch auto-stop\n  mc_rightstop <z1|z2|m3> <on|off>      Right switch auto-stop\n  mc_rightsw <on|off>                   Enable right switch inputs\n\n--- LED MCU (I2C slave at 0x30) ---\n  led_set <ring|all> <anim> <r> <g> <b> <brightness>\n                                        anim: off|static|spin|bounce|pulse\n                                        r/g/b: 0-255, brightness: 0-255\n  led_status <ring>                     Query ring animation state\n  led_config <param> <value>            Set persistent config param\n                                        params: num_rings, leds_per_ring,\n                                        spin_width, bounce_width,\n                                        spin_speed, bounce_speed,\n                                        pulse_speed (speeds in ms)\n  led_getconfig                         Read all config parameters\n\n--- Drawer Handle ---\n  drawer_led <off|red|green>            Drive bi-color LED\n  drawer_button                         Read drawer button state\n\n--- Solenoids (TRAY_IO_EXPANDER @ 0x20) ---\n  sol <0..11> <on|off>                  Drive single solenoid\n                                        0-3=T1V1-T1V4, 4-7=T2V1-T2V4, 8-11=T3V1-T3V4\n  sol_all <on|off>                      Drive all 12 solenoids\n\nNOTES:\n  - All three motors (z1, z2, m3) use independent STEP/DIR/ENABLE.\n  - Motor enables are on EXTRA_IO_EXPANDER: 'io_init' first.\n  - Motors are DISABLED at boot. Run 'enable' before 'step'.\n  - You must 'tmc_init' before any tmc_* command for that motor.\n==============================================================\n"
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "io_init",
+      "status": "PASS",
+      "raw": "io_init\n[IO] Probing EXTRA_IO_EXPANDER at 0x21...\n[IO]   Device ACKed at 0x21.\n[IO] EXTRA_IO_EXPANDER (0x21) initialized.\n[IO]   GPA0-GPA2: Z_BOT / SPARE_TOP / SPARE_BOT limit switches (inputs)\n[IO]   GPA3-GPA5: DIAG Z1/Z2/M3 (inputs)\n[IO]   GPA6:      Z  EN shared Z1+Z2 (output, active-LOW)\n[IO]   GPA7:      M3 EN (output, active-LOW)\n[IO]   GPB0:      DRAWER_SW (input)\n[IO]   GPB1-GPB6: T1SW1/T1SW2/T2SW1/T2SW2/T3SW1/T3SW2 (inputs)\n[IO]   GPB7:      Z_TOP shared Z1+Z2 (input)\n[IO] Probing TRAY_IO_EXPANDER at 0x20...\n[IO]   Device ACKed at 0x20.\n[IO] TRAY_IO_EXPANDER (0x20) initialized.\n[IO]   GPB0-GPB3: T1V1-T1V4 (sol 0-3)  (outputs, LOW=off)\n[IO]   GPB4-GPB7: T2V1-T2V4 (sol 4-7)  (outputs, LOW=off)\n[IO]   GPA0-GPA3: T3V1-T3V4 (sol 8-11) (outputs, LOW=off)\n[IO]   GPA4-GPA7: nc (inputs)"
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_init_z1",
+      "status": "PASS",
+      "raw": "tmc_init z1\n[TMC] Initializing UART for motor 'z1' at 115200 baud...\n[TMC]   SERCOM1 (TX=D13/PA16, RX=D12/PA17).\n[TMC]   Communication OK."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_microstep_z1",
+      "status": "PASS",
+      "raw": "tmc_microstep z1 8\n[TMC] 'z1' microsteps set to 8 per full step."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_current_z1",
+      "status": "PASS",
+      "raw": "tmc_current z1 50\n[TMC] 'z1' run current set to 50%."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_enable_z1",
+      "status": "PASS",
+      "raw": "tmc_enable z1\n[TMC] 'z1' software-ENABLED.\n[TMC]   (Hardware nEnable must also be LOW for driver to run.)"
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "enable_z1",
+      "status": "PASS",
+      "raw": "enable z1\n[MOTOR] Axis z1 ENABLED (EN driven LOW).\n[MOTOR] Note: 'z1' and 'z2' share one EN line \ufffd\ufffd\ufffd both enabled."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "step_z1",
+      "status": "PASS",
+      "raw": "step z1 1600 2000\n[MOTOR] Stepping z1: 1600 steps @ 2000 us...\n[MOTOR] z1 done (1600 steps)."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "disable_z1",
+      "status": "PASS",
+      "raw": "disable z1\n[MOTOR] Axis z1 DISABLED (EN driven HIGH).\n[MOTOR] Note: 'z1' and 'z2' share one EN line \ufffd\ufffd\ufffd both disabled."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "user_confirm_z1",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_init_z2",
+      "status": "PASS",
+      "raw": "tmc_init z2\n[TMC] Initializing UART for motor 'z2' at 115200 baud...\n[TMC]   SERCOM5 (TX=D3/PB16, RX=D2/PB17).\n[TMC]   Communication OK."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_microstep_z2",
+      "status": "PASS",
+      "raw": "tmc_microstep z2 8\n[TMC] 'z2' microsteps set to 8 per full step."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_current_z2",
+      "status": "PASS",
+      "raw": "tmc_current z2 50\n[TMC] 'z2' run current set to 50%."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_enable_z2",
+      "status": "PASS",
+      "raw": "tmc_enable z2\n[TMC] 'z2' software-ENABLED.\n[TMC]   (Hardware nEnable must also be LOW for driver to run.)"
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "enable_z2",
+      "status": "PASS",
+      "raw": "enable z2\n[MOTOR] Axis z2 ENABLED (EN driven LOW).\n[MOTOR] Note: 'z1' and 'z2' share one EN line \ufffd\ufffd\ufffd both enabled."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "step_z2",
+      "status": "PASS",
+      "raw": "step z2 1600 2000\n[MOTOR] Stepping z2: 1600 steps @ 2000 us...\n[MOTOR] z2 done (1600 steps)."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "disable_z2",
+      "status": "PASS",
+      "raw": "disable z2\n[MOTOR] Axis z2 DISABLED (EN driven HIGH).\n[MOTOR] Note: 'z1' and 'z2' share one EN line \ufffd\ufffd\ufffd both disabled."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "user_confirm_z2",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_init_m3",
+      "status": "PASS",
+      "raw": "tmc_init m3\n[TMC] Initializing UART for motor 'm3' at 115200 baud...\n[TMC]   Serial1/SERCOM3 (TX=D1/PA22, RX=D0/PA23).\n[TMC]   Communication OK."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_microstep_m3",
+      "status": "PASS",
+      "raw": "tmc_microstep m3 8\n[TMC] 'm3' microsteps set to 8 per full step."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_current_m3",
+      "status": "PASS",
+      "raw": "tmc_current m3 50\n[TMC] 'm3' run current set to 50%."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "tmc_enable_m3",
+      "status": "PASS",
+      "raw": "tmc_enable m3\n[TMC] 'm3' software-ENABLED.\n[TMC]   (Hardware nEnable must also be LOW for driver to run.)"
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "enable_m3",
+      "status": "PASS",
+      "raw": "enable m3\n[MOTOR] Axis m3 ENABLED (EN driven LOW)."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "step_m3",
+      "status": "PASS",
+      "raw": "step m3 1600 2000\n[MOTOR] Stepping m3: 1600 steps @ 2000 us...\n[MOTOR] m3 done (1600 steps)."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "disable_m3",
+      "status": "PASS",
+      "raw": "disable m3\n[MOTOR] Axis m3 DISABLED (EN driven HIGH)."
+    },
+    {
+      "section": "MOTORS_DIRECT",
+      "step": "user_confirm_m3",
+      "status": "PASS",
+      "raw": "user response"
+    }
+  ]
+}

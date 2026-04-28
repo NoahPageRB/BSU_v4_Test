@@ -1,0 +1,499 @@
+{
+  "timestamp": "2026-04-28T00:38:06.576744",
+  "versions": {
+    "test_suite": "1.0.0",
+    "main_fw_expected": "1.0.0",
+    "led_fw_expected": "1.0.0",
+    "main_fw_reported": "1.0.0",
+    "led_fw_reported": "1.0.0"
+  },
+  "overall": "PASS",
+  "summary": {
+    "total": 80,
+    "passed": 80,
+    "failed": 0,
+    "skipped": 0
+  },
+  "results": [
+    {
+      "section": "BASIC_COMMS",
+      "step": "help_response",
+      "status": "PASS",
+      "raw": "help\n===================== AVAILABLE COMMANDS =====================\n--- General ---\n  help                                  Show this help text\n  version                               Print Main + LED MCU firmware versions\n--- I/O Expanders (MCP23017 @ 0x20 + 0x21) ---\n  io_init                               Initialize both MCP23017s\n  io_reset                              Hardware-reset both MCP23017s\n  io_read                               Read all expander inputs\n--- MCU Pin Readback ---\n  mcu_read                              Read all MCU output pin states\n--- Motor Enable/Disable (via EXTRA_IO_EXPANDER GPA6..GPA7) ---\n  enable  <z|m3>                        Drive EN active (driver ON)\n  disable <z|m3>                        Drive EN inactive (driver OFF)\n                                        Z1 and Z2 share a single EN line;\n                                        'z1'/'z2' are accepted as aliases for 'z'.\n--- TMC2209 UART ---\n  tmc_init       <z1|z2|m3> [baud]      Init UART (default 115200)\n  tmc_status     <z1|z2|m3>             Read TMC2209 status/settings\n  tmc_current    <z1|z2|m3> <percent>   Set run current (0-100%)\n  tmc_hold       <z1|z2|m3> <percent>   Set hold current (0-100%)\n  tmc_microstep  <z1|z2|m3> <n>         Set microsteps (1..256)\n  tmc_stealthchop <z1|z2|m3> <on|off>   Toggle StealthChop mode\n  tmc_enable     <z1|z2|m3>             Software-enable via UART\n  tmc_disable    <z1|z2|m3>             Software-disable via UART\n--- Direct Pin Control ---\n  dir  <z1|z2|m3> <0|1>                 Set direction pin level\n  step <z1|z2|m3> <count> <delay_us>    Pulse STEP pin <count> times\n--- TMC429 Motion Controller (mc_) ---\n  mc_init [clock_mhz]                   Init SPI + TMC429 (default 32)\n  mc_status                             Read version + status flags\n  mc_limits <z1|z2|m3> <vmin> <vmax> <amax>\n                                        Set limits (all Hz or Hz/s)\n  mc_ramp <z1|z2|m3>                    Ramp mode (position w/ trapezoid)\n  mc_velocity <z1|z2|m3>                Velocity mode (continuous)\n  mc_hold <z1|z2|m3>                    Hold mode (lock position)\n  mc_target <z1|z2|m3> <position>       Set target position (ramp mode)\n  mc_vtarget <z1|z2|m3> <velocity_hz>   Set target velocity (vel mode)\n  mc_pos <z1|z2|m3>                     Read actual + target position\n  mc_setpos <z1|z2|m3> <position>       Write actual position register\n  mc_stop <z1|z2|m3>                    Stop one axis\n  mc_stopall                            Stop all three axes\n  mc_switches                           Read all limit switch states\n  mc_swpol <high|low>                   Set switch active polarity\n  mc_leftstop <z1|z2|m3> <on|off>       Left switch auto-stop\n  mc_rightstop <z1|z2|m3> <on|off>      Right switch auto-stop\n  mc_rightsw <on|off>                   Enable right switch inputs\n--- LED MCU (I2C slave at 0x30) ---\n  led_set <ring|all> <anim> <r> <g> <b> <brightness>\n                                        anim: off|static|spin|bounce|pulse\n                                        r/g/b: 0-255, brightness: 0-255\n  led_status <ring>                     Query ring animation state\n  led_config <param> <value>            Set persistent config param\n                                        params: num_rings, leds_per_ring,\n                                        spin_width, bounce_width,\n                                        spin_speed, bounce_speed,\n                                        pulse_speed (speeds in ms)\n  led_getconfig                         Read all config parameters\n--- Drawer Handle ---\n  drawer_led <off|red|green>            Drive bi-color LED\n  drawer_button                         Read drawer button state\n--- Solenoids (TRAY_IO_EXPANDER @ 0x20) ---\n  sol <0..11> <on|off>                  Drive single solenoid\n                                        0-3=T1V1-T1V4, 4-7=T2V1-T2V4, 8-11=T3V1-T3V4\n  sol_all <on|off>                      Drive all 12 solenoids\nNOTES:\n  - All three motors (z1, z2, m3) use independent STEP/DIR/ENABLE.\n  - Motor enables are on EXTRA_IO_EXPANDER: 'io_init' first.\n  - Motors are DISABLED at boot. Run 'enable' before 'step'.\n  - You must 'tmc_init' before any tmc_* command for that motor.\n=============================================================="
+    },
+    {
+      "section": "BASIC_COMMS",
+      "step": "main_fw_version_v1.0.0",
+      "status": "PASS",
+      "raw": "reported v1.0.0"
+    },
+    {
+      "section": "BASIC_COMMS",
+      "step": "led_fw_version_v1.0.0",
+      "status": "PASS",
+      "raw": "reported v1.0.0"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "io_init",
+      "status": "PASS",
+      "raw": "io_init\n[IO] Probing EXTRA_IO_EXPANDER at 0x21...\n[IO]   Device ACKed at 0x21.\n[IO] EXTRA_IO_EXPANDER (0x21) initialized.\n[IO]   GPA0-GPA2: Z_BOT / SPARE_TOP / SPARE_BOT limit switches (inputs)\n[IO]   GPA3-GPA5: DIAG Z1/Z2/M3 (inputs)\n[IO]   GPA6:      Z  EN shared Z1+Z2 (output, active-LOW)\n[IO]   GPA7:      M3 EN (output, active-LOW)\n[IO]   GPB0:      DRAWER_SW (input)\n[IO]   GPB1-GPB6: T1SW1/T1SW2/T2SW1/T2SW2/T3SW1/T3SW2 (inputs)\n[IO]   GPB7:      Z_TOP shared Z1+Z2 (input)\n[IO] Probing TRAY_IO_EXPANDER at 0x20...\n[IO]   Device ACKed at 0x20.\n[IO] TRAY_IO_EXPANDER (0x20) initialized.\n[IO]   GPB0-GPB3: T2V1-T2V4 (sol 4-7)  (outputs, LOW=off)\n[IO]   GPB4-GPB7: T1V1-T1V4 (sol 0-3)  (outputs, LOW=off)\n[IO]   GPA0-GPA3: T3V1-T3V4 (sol 8-11) (outputs, LOW=off)\n[IO]   GPA4-GPA7: nc (inputs)"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_init",
+      "status": "PASS",
+      "raw": "mc_init\n[MC] Initializing TMC429 on SERCOM4 SPI (nCS=D6) with clock=32 MHz...\n[MC]   Communication OK.\n[MC]   Version register: 0x429101\n[MC]   Step/Dir output mode active.\n[MC]   Motor mapping: z1=motor0 (M1), m3=motor1 (M2), z2=motor2 (M3)\n[MC]   Limit switches: END1=Left, END2=Right"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_init_z1",
+      "status": "PASS",
+      "raw": "tmc_init z1\n[TMC] Initializing UART for motor 'z1' at 115200 baud...\n[TMC]   SERCOM1 (TX=D13/PA16, RX=D12/PA17).\n[TMC]   Communication OK."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_microstep_z1",
+      "status": "PASS",
+      "raw": "tmc_microstep z1 8\n[TMC] 'z1' microsteps set to 8 per full step."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_current_z1",
+      "status": "PASS",
+      "raw": "tmc_current z1 50\n[TMC] 'z1' run current set to 50%."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_enable_z1",
+      "status": "PASS",
+      "raw": "tmc_enable z1\n[TMC] 'z1' software-ENABLED.\n[TMC]   (Hardware nEnable must also be LOW for driver to run.)"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_limits_z1",
+      "status": "PASS",
+      "raw": "mc_limits z1 100 500 500\n[MC] Setting limits for axis z1: vmin=100 Hz, vmax=500 Hz, amax=500 Hz/s\n[MC]   Actual vmin=99 Hz, vmax=499 Hz, amax=500 Hz/s"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "enable_z1",
+      "status": "PASS",
+      "raw": "enable z1\n[MOTOR] Axis z1 ENABLED (EN driven LOW).\n[MOTOR] Note: 'z1' and 'z2' share one EN line \ufffd\ufffd\ufffd both enabled."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_velocity_z1",
+      "status": "PASS",
+      "raw": "mc_velocity z1\n[MC] Axis z1 set to VELOCITY mode (continuous rotation)."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_vtarget_z1",
+      "status": "PASS",
+      "raw": "mc_vtarget z1 500\n[MC] Axis z1 target velocity set to 500 Hz (negative = reverse direction)"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "user_confirm_z1",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_init_z2",
+      "status": "PASS",
+      "raw": "tmc_init z2\n[TMC] Initializing UART for motor 'z2' at 115200 baud...\n[TMC]   SERCOM5 (TX=D3/PB16, RX=D2/PB17).\n[TMC]   Communication OK."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_microstep_z2",
+      "status": "PASS",
+      "raw": "tmc_microstep z2 8\n[TMC] 'z2' microsteps set to 8 per full step."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_current_z2",
+      "status": "PASS",
+      "raw": "tmc_current z2 50\n[TMC] 'z2' run current set to 50%."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_enable_z2",
+      "status": "PASS",
+      "raw": "tmc_enable z2\n[TMC] 'z2' software-ENABLED.\n[TMC]   (Hardware nEnable must also be LOW for driver to run.)"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_limits_z2",
+      "status": "PASS",
+      "raw": "mc_limits z2 100 500 500\n[MC] Setting limits for axis z2: vmin=100 Hz, vmax=500 Hz, amax=500 Hz/s\n[MC]   Actual vmin=99 Hz, vmax=499 Hz, amax=500 Hz/s"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "enable_z2",
+      "status": "PASS",
+      "raw": "enable z2\n[MOTOR] Axis z2 ENABLED (EN driven LOW).\n[MOTOR] Note: 'z1' and 'z2' share one EN line \ufffd\ufffd\ufffd both enabled."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_velocity_z2",
+      "status": "PASS",
+      "raw": "mc_velocity z2\n[MC] Axis z2 set to VELOCITY mode (continuous rotation)."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_vtarget_z2",
+      "status": "PASS",
+      "raw": "mc_vtarget z2 500\n[MC] Axis z2 target velocity set to 500 Hz (negative = reverse direction)"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "user_confirm_z2",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_init_m3",
+      "status": "PASS",
+      "raw": "tmc_init m3\n[TMC] Initializing UART for motor 'm3' at 115200 baud...\n[TMC]   Serial1/SERCOM3 (TX=D1/PA22, RX=D0/PA23).\n[TMC]   Communication OK."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_microstep_m3",
+      "status": "PASS",
+      "raw": "tmc_microstep m3 8\n[TMC] 'm3' microsteps set to 8 per full step."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_current_m3",
+      "status": "PASS",
+      "raw": "tmc_current m3 50\n[TMC] 'm3' run current set to 50%."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "tmc_enable_m3",
+      "status": "PASS",
+      "raw": "tmc_enable m3\n[TMC] 'm3' software-ENABLED.\n[TMC]   (Hardware nEnable must also be LOW for driver to run.)"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_limits_m3",
+      "status": "PASS",
+      "raw": "mc_limits m3 100 500 500\n[MC] Setting limits for axis m3: vmin=100 Hz, vmax=500 Hz, amax=500 Hz/s\n[MC]   Actual vmin=99 Hz, vmax=499 Hz, amax=500 Hz/s"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "enable_m3",
+      "status": "PASS",
+      "raw": "enable m3\n[MOTOR] Axis m3 ENABLED (EN driven LOW)."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_velocity_m3",
+      "status": "PASS",
+      "raw": "mc_velocity m3\n[MC] Axis m3 set to VELOCITY mode (continuous rotation)."
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "mc_vtarget_m3",
+      "status": "PASS",
+      "raw": "mc_vtarget m3 500\n[MC] Axis m3 target velocity set to 500 Hz (negative = reverse direction)"
+    },
+    {
+      "section": "MOTORS_TMC429",
+      "step": "user_confirm_m3",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "io_init",
+      "status": "PASS",
+      "raw": "io_init\n[IO] Probing EXTRA_IO_EXPANDER at 0x21...\n[IO]   Device ACKed at 0x21.\n[IO] EXTRA_IO_EXPANDER (0x21) initialized.\n[IO]   GPA0-GPA2: Z_BOT / SPARE_TOP / SPARE_BOT limit switches (inputs)\n[IO]   GPA3-GPA5: DIAG Z1/Z2/M3 (inputs)\n[IO]   GPA6:      Z  EN shared Z1+Z2 (output, active-LOW)\n[IO]   GPA7:      M3 EN (output, active-LOW)\n[IO]   GPB0:      DRAWER_SW (input)\n[IO]   GPB1-GPB6: T1SW1/T1SW2/T2SW1/T2SW2/T3SW1/T3SW2 (inputs)\n[IO]   GPB7:      Z_TOP shared Z1+Z2 (input)\n[IO] Probing TRAY_IO_EXPANDER at 0x20...\n[IO]   Device ACKed at 0x20.\n[IO] TRAY_IO_EXPANDER (0x20) initialized.\n[IO]   GPB0-GPB3: T2V1-T2V4 (sol 4-7)  (outputs, LOW=off)\n[IO]   GPB4-GPB7: T1V1-T1V4 (sol 0-3)  (outputs, LOW=off)\n[IO]   GPA0-GPA3: T3V1-T3V4 (sol 8-11) (outputs, LOW=off)\n[IO]   GPA4-GPA7: nc (inputs)"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "mc_swpol_high",
+      "status": "PASS",
+      "raw": "mc_swpol high\n[MC] Switches set to ACTIVE HIGH."
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "mc_rightsw_on",
+      "status": "PASS",
+      "raw": "mc_rightsw on\n[MC] Right switch inputs ENABLED globally."
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "baseline_io_read_all_open",
+      "status": "PASS",
+      "raw": "io_read\n[IO] === EXTRA_IO_EXPANDER (0x21) ===\n[IO]   Raw: GPIOA=0xC0, GPIOB=0x0\n[IO]   --- Limit switches ---\n[IO]     Z_TOP     (GPB7): open\n[IO]     Z_BOT     (GPA0): open\n[IO]     SPARE_TOP (GPA1): open\n[IO]     SPARE_BOT (GPA2): open\n[IO]   --- TMC2209 DIAG ---\n[IO]     Z1 DIAG (GPA3): LOW\n[IO]     Z2 DIAG (GPA4): LOW\n[IO]     M3 DIAG (GPA5): LOW\n[IO]   --- Motor enables (active-HIGH) ---\n[IO]     Z  EN  (GPA6, shared Z1+Z2): HIGH (disabled)\n[IO]     M3 EN  (GPA7):                HIGH (disabled)\n[IO]   --- Drawer + tray switches ---\n[IO]     DRAWER (GPB0): released\n[IO]     T1SW1  (GPB1): open\n[IO]     T1SW2  (GPB2): open\n[IO]     T2SW1  (GPB3): open\n[IO]     T2SW2  (GPB4): open\n[IO]     T3SW1  (GPB5): open\n[IO]     T3SW2  (GPB6): open\n[IO] === TRAY_IO_EXPANDER (0x20) ===\n[IO]   Raw: GPIOA=0x0, GPIOB=0x0\n[IO]   Solenoid readback: T1V1=off,T1V2=off,T1V3=off,T1V4=off,T2V1=off,T2V2=off,T2V3=off,T2V4=off,T3V1=off,T3V2=off,T3V3=off,T3V4=off"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "baseline_mc_switches_all_inactive",
+      "status": "PASS",
+      "raw": "mc_switches\n[MC] Limit switch states (as seen by TMC429):\n[MC]   z1 Left  (END1/REF1L): inactive\n[MC]   z1 Right (END2/REF1R): inactive\n[MC]   m3 Left  (END1/REF2L): inactive\n[MC]   m3 Right (END2/REF2R): inactive\n[MC]   z2 Left  (END1/REF3L): inactive\n[MC]   z2 Right (END2/REF3R): inactive\n[MC] Auto-stop configuration:\n[MC]   Z1 left-stop: ON, right-stop: ON\n[MC]   M3 left-stop: ON, right-stop: ON\n[MC]   Z2 left-stop: ON, right-stop: ON\n[MC]   Right switches globally: ENABLED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "Z_TOP_mc_confirm",
+      "status": "PASS",
+      "raw": "mc_switches\n[MC] Limit switch states (as seen by TMC429):\n[MC]   z1 Left  (END1/REF1L): ACTIVE\n[MC]   z1 Right (END2/REF1R): inactive\n[MC]   m3 Left  (END1/REF2L): inactive\n[MC]   m3 Right (END2/REF2R): inactive\n[MC]   z2 Left  (END1/REF3L): ACTIVE\n[MC]   z2 Right (END2/REF3R): inactive\n[MC] Auto-stop configuration:\n[MC]   Z1 left-stop: ON, right-stop: ON\n[MC]   M3 left-stop: ON, right-stop: ON\n[MC]   Z2 left-stop: ON, right-stop: ON\n[MC]   Right switches globally: ENABLED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "Z_TOP_detect",
+      "status": "PASS",
+      "raw": "Z_TOP TRIGGERED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "Z_BOT_mc_confirm",
+      "status": "PASS",
+      "raw": "mc_switches\n[MC] Limit switch states (as seen by TMC429):\n[MC]   z1 Left  (END1/REF1L): inactive\n[MC]   z1 Right (END2/REF1R): ACTIVE\n[MC]   m3 Left  (END1/REF2L): inactive\n[MC]   m3 Right (END2/REF2R): inactive\n[MC]   z2 Left  (END1/REF3L): inactive\n[MC]   z2 Right (END2/REF3R): ACTIVE\n[MC] Auto-stop configuration:\n[MC]   Z1 left-stop: ON, right-stop: ON\n[MC]   M3 left-stop: ON, right-stop: ON\n[MC]   Z2 left-stop: ON, right-stop: ON\n[MC]   Right switches globally: ENABLED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "Z_BOT_detect",
+      "status": "PASS",
+      "raw": "Z_BOT TRIGGERED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "SPARE_TOP_mc_confirm",
+      "status": "PASS",
+      "raw": "mc_switches\n[MC] Limit switch states (as seen by TMC429):\n[MC]   z1 Left  (END1/REF1L): inactive\n[MC]   z1 Right (END2/REF1R): inactive\n[MC]   m3 Left  (END1/REF2L): ACTIVE\n[MC]   m3 Right (END2/REF2R): inactive\n[MC]   z2 Left  (END1/REF3L): inactive\n[MC]   z2 Right (END2/REF3R): inactive\n[MC] Auto-stop configuration:\n[MC]   Z1 left-stop: ON, right-stop: ON\n[MC]   M3 left-stop: ON, right-stop: ON\n[MC]   Z2 left-stop: ON, right-stop: ON\n[MC]   Right switches globally: ENABLED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "SPARE_TOP_detect",
+      "status": "PASS",
+      "raw": "SPARE_TOP TRIGGERED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "SPARE_BOT_mc_confirm",
+      "status": "PASS",
+      "raw": "mc_switches\n[MC] Limit switch states (as seen by TMC429):\n[MC]   z1 Left  (END1/REF1L): inactive\n[MC]   z1 Right (END2/REF1R): inactive\n[MC]   m3 Left  (END1/REF2L): inactive\n[MC]   m3 Right (END2/REF2R): ACTIVE\n[MC]   z2 Left  (END1/REF3L): inactive\n[MC]   z2 Right (END2/REF3R): inactive\n[MC] Auto-stop configuration:\n[MC]   Z1 left-stop: ON, right-stop: ON\n[MC]   M3 left-stop: ON, right-stop: ON\n[MC]   Z2 left-stop: ON, right-stop: ON\n[MC]   Right switches globally: ENABLED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "SPARE_BOT_detect",
+      "status": "PASS",
+      "raw": "SPARE_BOT TRIGGERED"
+    },
+    {
+      "section": "LIMIT_SWITCHES",
+      "step": "final_mc_switches_all_inactive",
+      "status": "PASS",
+      "raw": "mc_switches\n[MC] Limit switch states (as seen by TMC429):\n[MC]   z1 Left  (END1/REF1L): inactive\n[MC]   z1 Right (END2/REF1R): inactive\n[MC]   m3 Left  (END1/REF2L): inactive\n[MC]   m3 Right (END2/REF2R): inactive\n[MC]   z2 Left  (END1/REF3L): inactive\n[MC]   z2 Right (END2/REF3R): inactive\n[MC] Auto-stop configuration:\n[MC]   Z1 left-stop: ON, right-stop: ON\n[MC]   M3 left-stop: ON, right-stop: ON\n[MC]   Z2 left-stop: ON, right-stop: ON\n[MC]   Right switches globally: ENABLED"
+    },
+    {
+      "section": "LEDS",
+      "step": "led_set_spin_red",
+      "status": "PASS",
+      "raw": "led_set all spin 255 0 0 255\n[LED] Sending: ring=all anim=spin color=(255,0,0) brightness=255\n[LED] Response: OK"
+    },
+    {
+      "section": "LEDS",
+      "step": "user_confirm_led_spin",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "DRAWER",
+      "step": "io_init",
+      "status": "PASS",
+      "raw": "io_init\n[IO] Probing EXTRA_IO_EXPANDER at 0x21...\n[IO]   Device ACKed at 0x21.\n[IO] EXTRA_IO_EXPANDER (0x21) initialized.\n[IO]   GPA0-GPA2: Z_BOT / SPARE_TOP / SPARE_BOT limit switches (inputs)\n[IO]   GPA3-GPA5: DIAG Z1/Z2/M3 (inputs)\n[IO]   GPA6:      Z  EN shared Z1+Z2 (output, active-LOW)\n[IO]   GPA7:      M3 EN (output, active-LOW)\n[IO]   GPB0:      DRAWER_SW (input)\n[IO]   GPB1-GPB6: T1SW1/T1SW2/T2SW1/T2SW2/T3SW1/T3SW2 (inputs)\n[IO]   GPB7:      Z_TOP shared Z1+Z2 (input)\n[IO] Probing TRAY_IO_EXPANDER at 0x20...\n[IO]   Device ACKed at 0x20.\n[IO] TRAY_IO_EXPANDER (0x20) initialized.\n[IO]   GPB0-GPB3: T2V1-T2V4 (sol 4-7)  (outputs, LOW=off)\n[IO]   GPB4-GPB7: T1V1-T1V4 (sol 0-3)  (outputs, LOW=off)\n[IO]   GPA0-GPA3: T3V1-T3V4 (sol 8-11) (outputs, LOW=off)\n[IO]   GPA4-GPA7: nc (inputs)"
+    },
+    {
+      "section": "DRAWER",
+      "step": "button_press_detected",
+      "status": "PASS",
+      "raw": "user pressed button"
+    },
+    {
+      "section": "DRAWER",
+      "step": "button_release_detected",
+      "status": "PASS",
+      "raw": "user released button"
+    },
+    {
+      "section": "DRAWER",
+      "step": "drawer_led_red_cmd",
+      "status": "PASS",
+      "raw": "drawer_led red\n[DRAWER] LED RED (IN1=HIGH, IN2=LOW)."
+    },
+    {
+      "section": "DRAWER",
+      "step": "user_confirm_red",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "DRAWER",
+      "step": "drawer_led_green_cmd",
+      "status": "PASS",
+      "raw": "drawer_led green\n[DRAWER] LED GREEN (IN1=LOW, IN2=HIGH)."
+    },
+    {
+      "section": "DRAWER",
+      "step": "user_confirm_green",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "io_init",
+      "status": "PASS",
+      "raw": "io_init\n[IO] Probing EXTRA_IO_EXPANDER at 0x21...\n[IO]   Device ACKed at 0x21.\n[IO] EXTRA_IO_EXPANDER (0x21) initialized.\n[IO]   GPA0-GPA2: Z_BOT / SPARE_TOP / SPARE_BOT limit switches (inputs)\n[IO]   GPA3-GPA5: DIAG Z1/Z2/M3 (inputs)\n[IO]   GPA6:      Z  EN shared Z1+Z2 (output, active-LOW)\n[IO]   GPA7:      M3 EN (output, active-LOW)\n[IO]   GPB0:      DRAWER_SW (input)\n[IO]   GPB1-GPB6: T1SW1/T1SW2/T2SW1/T2SW2/T3SW1/T3SW2 (inputs)\n[IO]   GPB7:      Z_TOP shared Z1+Z2 (input)\n[IO] Probing TRAY_IO_EXPANDER at 0x20...\n[IO]   Device ACKed at 0x20.\n[IO] TRAY_IO_EXPANDER (0x20) initialized.\n[IO]   GPB0-GPB3: T2V1-T2V4 (sol 4-7)  (outputs, LOW=off)\n[IO]   GPB4-GPB7: T1V1-T1V4 (sol 0-3)  (outputs, LOW=off)\n[IO]   GPA0-GPA3: T3V1-T3V4 (sol 8-11) (outputs, LOW=off)\n[IO]   GPA4-GPA7: nc (inputs)"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_0_T1V1_on_cmd",
+      "status": "PASS",
+      "raw": "sol 0 on\n[SOL] SOL0 (T1V1) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T1V1",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_1_T1V2_on_cmd",
+      "status": "PASS",
+      "raw": "sol 1 on\n[SOL] SOL1 (T1V2) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T1V2",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_2_T1V3_on_cmd",
+      "status": "PASS",
+      "raw": "sol 2 on\n[SOL] SOL2 (T1V3) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T1V3",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_3_T1V4_on_cmd",
+      "status": "PASS",
+      "raw": "sol 3 on\n[SOL] SOL3 (T1V4) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T1V4",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_4_T2V1_on_cmd",
+      "status": "PASS",
+      "raw": "sol 4 on\n[SOL] SOL4 (T2V1) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T2V1",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_5_T2V2_on_cmd",
+      "status": "PASS",
+      "raw": "sol 5 on\n[SOL] SOL5 (T2V2) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T2V2",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_6_T2V3_on_cmd",
+      "status": "PASS",
+      "raw": "sol 6 on\n[SOL] SOL6 (T2V3) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T2V3",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_7_T2V4_on_cmd",
+      "status": "PASS",
+      "raw": "sol 7 on\n[SOL] SOL7 (T2V4) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T2V4",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_8_T3V1_on_cmd",
+      "status": "PASS",
+      "raw": "sol 8 on\n[SOL] SOL8 (T3V1) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T3V1",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_9_T3V2_on_cmd",
+      "status": "PASS",
+      "raw": "sol 9 on\n[SOL] SOL9 (T3V2) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T3V2",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_10_T3V3_on_cmd",
+      "status": "PASS",
+      "raw": "sol 10 on\n[SOL] SOL10 (T3V3) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T3V3",
+      "status": "PASS",
+      "raw": "user response"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "sol_11_T3V4_on_cmd",
+      "status": "PASS",
+      "raw": "sol 11 on\n[SOL] SOL11 (T3V4) -> ON"
+    },
+    {
+      "section": "SOLENOIDS",
+      "step": "user_confirm_T3V4",
+      "status": "PASS",
+      "raw": "user response"
+    }
+  ]
+}

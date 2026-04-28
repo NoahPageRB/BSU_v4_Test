@@ -106,10 +106,27 @@ static constexpr uint8_t MAX_RINGS    = 8;   // Maximum supported rings
 // I2C Protocol Constants
 // ============================================================================
 
+// ============================================================================
+// Firmware Version
+// ============================================================================
+//
+// IMPORTANT: bump these on every change. Major = breaking, Minor = feature,
+// Patch = bug fix. See CLAUDE.md at the repo root.
+#define LED_FW_VERSION_MAJOR 1
+#define LED_FW_VERSION_MINOR 0
+#define LED_FW_VERSION_PATCH 0
+#define _LED_VER_STR(x) #x
+#define _LED_VER_XSTR(x) _LED_VER_STR(x)
+#define LED_FW_VERSION_STR  \
+    _LED_VER_XSTR(LED_FW_VERSION_MAJOR) "." \
+    _LED_VER_XSTR(LED_FW_VERSION_MINOR) "." \
+    _LED_VER_XSTR(LED_FW_VERSION_PATCH)
+
 static constexpr uint8_t CMD_SET_ANIMATION = 0x01;
 static constexpr uint8_t CMD_GET_STATUS    = 0x02;
 static constexpr uint8_t CMD_SET_CONFIG    = 0x03;
 static constexpr uint8_t CMD_GET_CONFIG    = 0x04;
+static constexpr uint8_t CMD_GET_VERSION   = 0x05;
 
 static constexpr uint8_t RSP_OK      = 0xA0;
 static constexpr uint8_t RSP_BAD_CMD = 0xE1;
@@ -418,6 +435,17 @@ static void onI2CReceive(int numBytes) {
         break;
     }
 
+    // ----- CMD_GET_VERSION (0x05) -----
+    // Response: [RSP_OK, major, minor, patch]
+    case CMD_GET_VERSION: {
+        rspBuf[0] = RSP_OK;
+        rspBuf[1] = (uint8_t)LED_FW_VERSION_MAJOR;
+        rspBuf[2] = (uint8_t)LED_FW_VERSION_MINOR;
+        rspBuf[3] = (uint8_t)LED_FW_VERSION_PATCH;
+        rspLen = 4;
+        break;
+    }
+
     default:
         rspBuf[0] = RSP_BAD_CMD;
         rspLen = 1;
@@ -499,6 +527,7 @@ static void printHelp() {
         "  getconfig             Show all config\n"
         "  off                   All LEDs off\n"
         "  info                  Firmware and hardware info\n"
+        "  version               Print firmware version\n"
         "  help                  This message\n"
     ));
 }
@@ -522,6 +551,8 @@ static void processCommand(char *line) {
     // --- info ---
     else if (strcasecmp(tokens[0], "info") == 0) {
         Serial.println(F("[INFO] LED MCU — ATSAMD21E18A (Trinket M0)"));
+        Serial.print(F("[INFO] Firmware version: v"));
+        Serial.println(F(LED_FW_VERSION_STR));
         Serial.print(F("[INFO] I2C slave address: 0x"));
         Serial.println(I2C_ADDR, HEX);
         Serial.print(F("[INFO] NeoPixel pin: D"));
@@ -531,6 +562,12 @@ static void processCommand(char *line) {
         Serial.print(F("[INFO] Uptime: "));
         Serial.print(millis() / 1000);
         Serial.println(F("s"));
+    }
+
+    // --- version ---
+    else if (strcasecmp(tokens[0], "version") == 0) {
+        Serial.print(F("[VERSION] LED MCU firmware: v"));
+        Serial.println(F(LED_FW_VERSION_STR));
     }
 
     // --- off ---
