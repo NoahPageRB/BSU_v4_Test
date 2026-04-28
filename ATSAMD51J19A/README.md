@@ -58,7 +58,7 @@ janelia-arduino/TMC2209 library handles transparently.
 
 ### I/O Expanders (2x MCP23017)
 
-Both expanders share a common nRESET line on **D8** (pulled HIGH via 10kΩ).
+Each expander has its own nRESET line: **D8** = TRAY (0x20), **D9** = EXTRA (0x21). Both pulled HIGH via 10kΩ.
 
 #### EXTRA_IO_EXPANDER — I2C 0x21 (A0=VDD)
 
@@ -116,8 +116,8 @@ A single DRV8231A drives a two-terminal bi-color LED; polarity selects color.
 
 | MCU Pin | DRV8231A Input | State |
 |---------|----------------|-------|
-| D10     | IN1            | HIGH=drive one way |
-| D11     | IN2            | HIGH=drive the other way |
+| D11     | IN1            | HIGH=drive one way |
+| D10     | IN2            | HIGH=drive the other way |
 
 - `IN1=1, IN2=0` → **RED**
 - `IN1=0, IN2=1` → **GREEN**
@@ -162,7 +162,7 @@ Connect at **115200 baud** over USB serial. Commands are case-insensitive.
 | Command    | Description |
 |------------|-------------|
 | `io_init`  | Initialize (or re-initialize) both MCP23017s |
-| `io_reset` | Hardware-reset both MCP23017s via the common nRESET pin |
+| `io_reset` | Hardware-reset both MCP23017s (drives D8 + D9 LOW briefly) |
 | `io_read`  | Read all expander inputs (DIAGs, drawer button, switches, solenoid readback) |
 
 ---

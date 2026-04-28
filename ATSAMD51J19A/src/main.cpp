@@ -70,9 +70,11 @@ static constexpr uint8_t PIN_M3_STEP = A3;
 static constexpr uint8_t PIN_Z2_DIR  = A4;
 static constexpr uint8_t PIN_Z2_STEP = A5;
 
-// I/O expander nRESET (shared by both MCP23017s via a hardware wire-OR /
-// common reset net on the PCB). Active LOW, externally pulled HIGH.
-static constexpr uint8_t PIN_IO_NRESET = 8;
+// I/O expander nRESETs — independent pins per MCP23017. Active LOW,
+// externally pulled HIGH. We hold them as INPUT during normal operation
+// and only drive LOW transiently from cmdIoReset().
+static constexpr uint8_t PIN_TRAY_NRESET  = 8; // TRAY_IO_EXPANDER  (0x20)
+static constexpr uint8_t PIN_EXTRA_NRESET = 9; // EXTRA_IO_EXPANDER (0x21)
 
 // TMC429 motion controller SPI chip select (active LOW, plain GPIO)
 static constexpr uint8_t PIN_MC_NCS = 6;
@@ -88,8 +90,8 @@ static constexpr uint8_t PIN_MC_MISO = 5;  // PB14 SERCOM4 PAD[2]
 //   IN1=1, IN2=0 -> RED
 //   IN1=0, IN2=1 -> GREEN
 //   IN1=0, IN2=0 -> OFF (coast)
-static constexpr uint8_t PIN_DRAWER_LED_IN1 = 10;
-static constexpr uint8_t PIN_DRAWER_LED_IN2 = 11;
+static constexpr uint8_t PIN_DRAWER_LED_IN1 = 11;
+static constexpr uint8_t PIN_DRAWER_LED_IN2 = 10;
 
 // I2C pins (driven by SoftI2C, NOT the Wire library)
 static constexpr uint8_t PIN_I2C_SDA = SDA; // PB2 on Metro M4
@@ -429,8 +431,9 @@ void setup() {
     pinMode(PIN_DRAWER_LED_IN1, OUTPUT); digitalWrite(PIN_DRAWER_LED_IN1, LOW);
     pinMode(PIN_DRAWER_LED_IN2, OUTPUT); digitalWrite(PIN_DRAWER_LED_IN2, LOW);
 
-    // I/O expander nRESET: start as input (external pull-up keeps it HIGH)
-    pinMode(PIN_IO_NRESET, INPUT);
+    // I/O expander nRESETs: start as input (external pull-ups keep them HIGH)
+    pinMode(PIN_TRAY_NRESET,  INPUT);
+    pinMode(PIN_EXTRA_NRESET, INPUT);
 
     // TMC429 chip select HIGH (inactive) before SPI configured
     pinMode(PIN_MC_NCS, OUTPUT); digitalWrite(PIN_MC_NCS, HIGH);
@@ -826,20 +829,22 @@ static void cmdIoInit() {
 }
 
 // ============================================================================
-// Command: io_reset  (common nRESET line for both MCP23017s)
+// Command: io_reset  (independent nRESET lines: TRAY=D8, EXTRA=D9)
 // ============================================================================
 
 static void cmdIoReset() {
     Serial.println(F("[IO] Hardware-resetting both MCP23017s..."));
-    Serial.println(F("[IO]   Driving nRESET LOW for 10 ms..."));
+    Serial.println(F("[IO]   Driving TRAY nRESET (D8) and EXTRA nRESET (D9) LOW for 10 ms..."));
 
-    pinMode(PIN_IO_NRESET, OUTPUT);
-    digitalWrite(PIN_IO_NRESET, LOW);
+    pinMode(PIN_TRAY_NRESET,  OUTPUT); digitalWrite(PIN_TRAY_NRESET,  LOW);
+    pinMode(PIN_EXTRA_NRESET, OUTPUT); digitalWrite(PIN_EXTRA_NRESET, LOW);
     delay(10);
-    digitalWrite(PIN_IO_NRESET, HIGH);
-    pinMode(PIN_IO_NRESET, INPUT); // Release to external pull-up
+    digitalWrite(PIN_TRAY_NRESET,  HIGH);
+    digitalWrite(PIN_EXTRA_NRESET, HIGH);
+    pinMode(PIN_TRAY_NRESET,  INPUT); // Release to external pull-up
+    pinMode(PIN_EXTRA_NRESET, INPUT);
 
-    Serial.println(F("[IO]   nRESET released (external 10k pull-up)."));
+    Serial.println(F("[IO]   nRESETs released (external pull-ups)."));
     Serial.println(F("[IO]   Waiting 50 ms for startup..."));
     delay(50);
 
@@ -940,15 +945,17 @@ static void cmdMcuRead() {
     Serial.print(F("[MCU]   M3 DIR  (A2): ")); Serial.println(digitalRead(PIN_M3_DIR) ? "HIGH" : "LOW");
 
     Serial.println(F("[MCU] --- Drawer LED H-Bridge ---"));
-    Serial.print(F("[MCU]   IN1 (D10): ")); Serial.println(digitalRead(PIN_DRAWER_LED_IN1) ? "HIGH" : "LOW");
-    Serial.print(F("[MCU]   IN2 (D11): ")); Serial.println(digitalRead(PIN_DRAWER_LED_IN2) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   IN1 (D11): ")); Serial.println(digitalRead(PIN_DRAWER_LED_IN1) ? "HIGH" : "LOW");
+    Serial.print(F("[MCU]   IN2 (D10): ")); Serial.println(digitalRead(PIN_DRAWER_LED_IN2) ? "HIGH" : "LOW");
 
     Serial.println(F("[MCU] --- TMC429 SPI ---"));
     Serial.print(F("[MCU]   nCS (D6):  ")); Serial.println(digitalRead(PIN_MC_NCS) ? "HIGH (inactive)" : "LOW (selected)");
 
-    Serial.println(F("[MCU] --- I/O Expander nRESET (D8) ---"));
-    Serial.print(F("[MCU]   IO nRST:   "));
-    Serial.println(digitalRead(PIN_IO_NRESET) ? "HIGH (not in reset)" : "LOW (in reset!)");
+    Serial.println(F("[MCU] --- I/O Expander nRESETs ---"));
+    Serial.print(F("[MCU]   TRAY  nRST (D8): "));
+    Serial.println(digitalRead(PIN_TRAY_NRESET)  ? "HIGH (not in reset)" : "LOW (in reset!)");
+    Serial.print(F("[MCU]   EXTRA nRST (D9): "));
+    Serial.println(digitalRead(PIN_EXTRA_NRESET) ? "HIGH (not in reset)" : "LOW (in reset!)");
 }
 
 // ============================================================================
@@ -1358,7 +1365,7 @@ static void cmdMcInit(const char *clkStr) {
         mcInitialized = true;
 
         Serial.println(F("[MC]   Step/Dir output mode active."));
-        Serial.println(F("[MC]   Motor mapping: z1=motor0 (M1), z2=motor1 (M2), m3=motor2 (M3)"));
+        Serial.println(F("[MC]   Motor mapping: z1=motor0 (M1), m3=motor1 (M2), z2=motor2 (M3)"));
         Serial.println(F("[MC]   Limit switches: END1=Left, END2=Right"));
     } else {
         Serial.println(F("[MC]   ERROR: TMC429 not responding!"));
@@ -1377,11 +1384,11 @@ static void cmdMcStatus() {
     TMC429::Status st = motionController.getStatus();
     Serial.println(F("[MC] Status flags:"));
     Serial.print(F("[MC]   At target pos M0 (z1): ")); Serial.println(st.at_target_position_0 ? "YES" : "no");
-    Serial.print(F("[MC]   At target pos M1 (z2): ")); Serial.println(st.at_target_position_1 ? "YES" : "no");
-    Serial.print(F("[MC]   At target pos M2 (m3): ")); Serial.println(st.at_target_position_2 ? "YES" : "no");
+    Serial.print(F("[MC]   At target pos M1 (m3): ")); Serial.println(st.at_target_position_1 ? "YES" : "no");
+    Serial.print(F("[MC]   At target pos M2 (z2): ")); Serial.println(st.at_target_position_2 ? "YES" : "no");
     Serial.print(F("[MC]   Switch left M0 (z1):   ")); Serial.println(st.switch_left_0 ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Switch left M1 (z2):   ")); Serial.println(st.switch_left_1 ? "ACTIVE" : "inactive");
-    Serial.print(F("[MC]   Switch left M2 (m3):   ")); Serial.println(st.switch_left_2 ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   Switch left M1 (m3):   ")); Serial.println(st.switch_left_1 ? "ACTIVE" : "inactive");
+    Serial.print(F("[MC]   Switch left M2 (z2):   ")); Serial.println(st.switch_left_2 ? "ACTIVE" : "inactive");
     Serial.print(F("[MC]   Interrupt:              ")); Serial.println(st.interrupt ? "YES" : "no");
 
     for (int m = 0; m < 3; m++) {
