@@ -39,9 +39,9 @@ import serial.tools.list_ports
 # Any change to either MCU's firmware MUST come with a Python change here:
 # bump the matching EXPECTED_*_FW_VERSION to the new firmware version, AND
 # bump TEST_SUITE_VERSION because the Python file just changed.
-TEST_SUITE_VERSION       = "1.0.0"
-EXPECTED_MAIN_FW_VERSION = "1.0.0"
-EXPECTED_LED_FW_VERSION  = "1.0.0"
+TEST_SUITE_VERSION       = "1.1.0"
+EXPECTED_MAIN_FW_VERSION = "1.1.0"
+EXPECTED_LED_FW_VERSION  = "1.0.1"
 
 BAUD_RATE = 115200
 DEFAULT_TIMEOUT = 2.0

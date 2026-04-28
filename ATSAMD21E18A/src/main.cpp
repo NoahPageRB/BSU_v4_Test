@@ -114,7 +114,7 @@ static constexpr uint8_t MAX_RINGS    = 8;   // Maximum supported rings
 // Patch = bug fix. See CLAUDE.md at the repo root.
 #define LED_FW_VERSION_MAJOR 1
 #define LED_FW_VERSION_MINOR 0
-#define LED_FW_VERSION_PATCH 0
+#define LED_FW_VERSION_PATCH 1
 #define _LED_VER_STR(x) #x
 #define _LED_VER_XSTR(x) _LED_VER_STR(x)
 #define LED_FW_VERSION_STR  \
@@ -316,6 +316,13 @@ static void updateRing(uint8_t ringIdx) {
 static uint8_t rspBuf[16];
 static volatile uint8_t rspLen = 0;
 
+// Set by doSetConfig (called from the I2C ISR for CMD_SET_CONFIG) to request
+// a flash save. The actual saveConfig() + strip.updateLength() runs in loop()
+// — never inside the ISR, since FlashStorage row erase + write blocks for
+// 20-100 ms with interrupts effectively stalled, which would cause the master
+// to time out and the next I2C transaction to NACK.
+static volatile bool pendingSave = false;
+
 // ============================================================================
 // Shared Command Logic (used by both I2C and Serial CLI)
 // ============================================================================
@@ -346,7 +353,12 @@ static uint8_t doSetAnimation(uint8_t ring, uint8_t anim, uint8_t r, uint8_t g,
     return RSP_OK;
 }
 
-/// Set a config parameter and save to flash. Returns RSP_OK or RSP_BAD_FMT.
+/// Set a config parameter. Returns RSP_OK or RSP_BAD_FMT.
+///
+/// IMPORTANT: this is called from the I2C ISR (CMD_SET_CONFIG) as well as
+/// the serial CLI. The actual flash write and NeoPixel buffer resize are
+/// deferred to loop() via `pendingSave` so the ISR returns fast and the
+/// master sees an immediate ACK.
 static uint8_t doSetConfig(uint8_t paramId, uint16_t value) {
     switch (paramId) {
         case CFG_NUM_RINGS:     config.numRings      = (uint8_t)value;  break;
@@ -358,8 +370,7 @@ static uint8_t doSetConfig(uint8_t paramId, uint16_t value) {
         case CFG_PULSE_SPEED:   config.pulseSpeedMs   = value;           break;
         default: return RSP_BAD_FMT;
     }
-    saveConfig();
-    strip.updateLength(totalLeds());
+    pendingSave = true;
     return RSP_OK;
 }
 
@@ -695,6 +706,16 @@ void loop() {
         }
         strip.show();
         lastShow = now;
+    }
+
+    // --- Deferred config save (out of I2C ISR) ---
+    // Picks up the flag set by doSetConfig() and does the slow work here:
+    // FlashStorage row erase + write (20-100 ms) and NeoPixel buffer realloc.
+    // Doing this in the ISR caused the master to time out and lose commands.
+    if (pendingSave) {
+        pendingSave = false;
+        saveConfig();
+        strip.updateLength(totalLeds());
     }
 
     // --- Serial CLI ---

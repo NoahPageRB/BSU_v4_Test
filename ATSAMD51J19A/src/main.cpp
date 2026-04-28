@@ -221,7 +221,7 @@ static constexpr uint8_t NUM_SOLENOIDS = 12;
 // IMPORTANT: bump these on every change. Major = breaking, Minor = feature,
 // Patch = bug fix. See CLAUDE.md at the repo root.
 #define BSU_FW_VERSION_MAJOR 1
-#define BSU_FW_VERSION_MINOR 0
+#define BSU_FW_VERSION_MINOR 1
 #define BSU_FW_VERSION_PATCH 0
 #define _BSU_VER_STR(x) #x
 #define _BSU_VER_XSTR(x) _BSU_VER_STR(x)
@@ -1078,12 +1078,25 @@ static void cmdDisable(const char *axis) {
     int bit = enableBitForAxis(axis);
     if (bit < 0) { Serial.println(F("[ERROR] Invalid axis. Use: z or m3 (z1/z2 also accepted)")); return; }
 
+    // UART soft-disable the corresponding TMC2209(s) BEFORE dropping the EN
+    // line. This sets the chopper TOFF=0 so the driver cannot step regardless
+    // of the EN pin or any noise on its STEP input. Important for the Z gantry
+    // because Z1 and Z2 share one EN line: when the next axis re-enables it,
+    // a previously-disabled-only-via-GPIO Z driver would otherwise wake back
+    // up holding-current and respond to crosstalk on its STEP line.
+    if (bit == BIT_Z_EN) {
+        if (tmcZ1Initialized) tmcZ1.disable();
+        if (tmcZ2Initialized) tmcZ2.disable();
+    } else if (bit == BIT_M3_EN) {
+        if (tmcM3Initialized) tmcM3.disable();
+    }
+
     uint8_t mask = (uint8_t)(1 << bit);
     uint8_t newVal = EN_ACTIVE_HIGH ? (extraOlatA & (uint8_t)~mask) : (extraOlatA | mask);
     if (!writeExtraOlatA(newVal)) return;
 
     Serial.print(F("[MOTOR] Axis ")); Serial.print(axis);
-    Serial.print(F(" DISABLED (EN driven "));
+    Serial.print(F(" DISABLED (chopper TOFF=0, EN driven "));
     Serial.print(EN_ACTIVE_HIGH ? "LOW" : "HIGH");
     Serial.println(F(")."));
     if (bit == BIT_Z_EN && strcasecmp(axis, "z") != 0) {
@@ -1115,17 +1128,26 @@ static void cmdTmcInit(const char *motor, const char *baudStr) {
     Serial.print(F("' at ")); Serial.print(baud); Serial.println(F(" baud..."));
 
     if (strcasecmp(motor, "z1") == 0) {
-        tmcZ1.setup(Z1MotorSerial, baud);
+        // Mux pins to SERCOM1 BEFORE tmc.setup(): tmc.setup() runs the
+        // TMC2209 init sequence which immediately writes GCONF.pdn_disable=1
+        // over UART. If the pins aren't muxed yet that write goes nowhere,
+        // the driver stays in standby (PDN_UART = standby disable), and all
+        // subsequent register writes are silently ignored.
         pinPeripheral(PIN_Z1_UART_RX, PIO_SERCOM);
         pinPeripheral(PIN_Z1_UART_TX, PIO_SERCOM);
+        tmcZ1.setup(Z1MotorSerial, baud);
         while (Z1MotorSerial.available()) Z1MotorSerial.read();
         tmcZ1Initialized = true;
         Serial.println(F("[TMC]   SERCOM1 (TX=D13/PA16, RX=D12/PA17)."));
     }
     else if (strcasecmp(motor, "z2") == 0) {
-        tmcZ2.setup(Z2MotorSerial, baud);
+        // See Z1 comment above — same ordering rule. PB16/PB17 default to
+        // I2S on the Metro M4 variant, so without this pre-mux the very
+        // first GCONF write was being lost and the Z2 driver never woke
+        // from standby until a second tmc_init z2 fired.
         pinPeripheral(PIN_Z2_UART_RX, PIO_SERCOM);
         pinPeripheral(PIN_Z2_UART_TX, PIO_SERCOM);
+        tmcZ2.setup(Z2MotorSerial, baud);
         while (Z2MotorSerial.available()) Z2MotorSerial.read();
         tmcZ2Initialized = true;
         Serial.println(F("[TMC]   SERCOM5 (TX=D3/PB16, RX=D2/PB17)."));
