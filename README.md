@@ -143,9 +143,6 @@ step z1 1600 2000
 ```
 The motor should make a full rotation.
 
-> `tmc_init` occasionally needs a second send — known timing quirk during
-> bring-up.
-
 Repeat for **Z2** (leave `z` enabled — same physical pin):
 ```
 tmc_init z2

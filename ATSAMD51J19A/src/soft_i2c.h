@@ -10,6 +10,12 @@
 //
 // This is intentionally minimal: only write-byte and read-byte transactions
 // are implemented, which is all we need for MCP23017 register access.
+//
+// Reliability: every public transaction is automatically retried up to 3
+// times with backoff (200 µs, 800 µs) on NACK or other failure. UART
+// interrupts (Z1/Z2/M3) can preempt the bitbang and stretch a 5 µs SCL
+// half-period enough to violate I2C timing; without retries that produces
+// "LED command lost" / "expander write glitched" artifacts.
 // ============================================================================
 
 #pragma once
@@ -29,9 +35,62 @@ public:
         delayMicroseconds(10);
     }
 
-    /// Write a single byte to a register on a device.
-    /// Returns true if all ACKs were received.
+    // ------------------------------------------------------------------------
+    // Public retrying wrappers. Each retries the underlying transaction up to
+    // RETRY_ATTEMPTS times before returning false.
+    // ------------------------------------------------------------------------
+
     bool writeRegister(uint8_t addr, uint8_t reg, uint8_t value) {
+        return _retry([&] { return _writeRegisterOnce(addr, reg, value); });
+    }
+
+    bool readRegister(uint8_t addr, uint8_t reg, uint8_t &out) {
+        return _retry([&] { return _readRegisterOnce(addr, reg, out); });
+    }
+
+    bool readRegister16(uint8_t addr, uint8_t reg, uint8_t &outA, uint8_t &outB) {
+        return _retry([&] { return _readRegister16Once(addr, reg, outA, outB); });
+    }
+
+    bool probe(uint8_t addr) {
+        return _retry([&] { return _probeOnce(addr); });
+    }
+
+    bool writeBytes(uint8_t addr, const uint8_t *data, size_t len) {
+        return _retry([&] { return _writeBytesOnce(addr, data, len); });
+    }
+
+    bool readBytes(uint8_t addr, uint8_t *data, size_t len) {
+        return _retry([&] { return _readBytesOnce(addr, data, len); });
+    }
+
+private:
+    uint8_t _sda;
+    uint8_t _scl;
+
+    // Timing: ~5 µs half-period → ~100 kHz. Generous for reliability.
+    static constexpr uint8_t HALF_PERIOD_US = 5;
+
+    // Retry policy. 3 attempts total with backoff between: 0 µs (first try),
+    // 200 µs (second), 800 µs (third). The backoff lets a transient ISR
+    // preemption clear and any contending master release the bus.
+    static constexpr uint8_t RETRY_ATTEMPTS = 3;
+
+    template <typename Fn>
+    bool _retry(Fn &&fn) {
+        if (fn()) return true;
+        delayMicroseconds(200);
+        if (fn()) return true;
+        delayMicroseconds(800);
+        return fn();
+    }
+
+    // ------------------------------------------------------------------------
+    // Single-attempt transaction implementations. Public wrappers above call
+    // these via _retry().
+    // ------------------------------------------------------------------------
+
+    bool _writeRegisterOnce(uint8_t addr, uint8_t reg, uint8_t value) {
         startCondition();
         if (!writeByte((addr << 1) | 0)) { stopCondition(); return false; } // W
         if (!writeByte(reg))              { stopCondition(); return false; }
@@ -40,15 +99,11 @@ public:
         return true;
     }
 
-    /// Read a single byte from a register on a device.
-    /// Returns true if successful, storing result in `out`.
-    bool readRegister(uint8_t addr, uint8_t reg, uint8_t &out) {
-        // Write phase: send register address
+    bool _readRegisterOnce(uint8_t addr, uint8_t reg, uint8_t &out) {
         startCondition();
         if (!writeByte((addr << 1) | 0)) { stopCondition(); return false; } // W
         if (!writeByte(reg))              { stopCondition(); return false; }
 
-        // Repeated start, then read phase
         startCondition();
         if (!writeByte((addr << 1) | 1)) { stopCondition(); return false; } // R
         out = readByte(false); // NACK after single byte
@@ -56,9 +111,7 @@ public:
         return true;
     }
 
-    /// Read two consecutive bytes (e.g. GPIOA + GPIOB in one transaction).
-    /// Returns true if successful.
-    bool readRegister16(uint8_t addr, uint8_t reg, uint8_t &outA, uint8_t &outB) {
+    bool _readRegister16Once(uint8_t addr, uint8_t reg, uint8_t &outA, uint8_t &outB) {
         startCondition();
         if (!writeByte((addr << 1) | 0)) { stopCondition(); return false; }
         if (!writeByte(reg))              { stopCondition(); return false; }
@@ -71,17 +124,14 @@ public:
         return true;
     }
 
-    /// Probe whether a device ACKs its address.
-    bool probe(uint8_t addr) {
+    bool _probeOnce(uint8_t addr) {
         startCondition();
         bool ack = writeByte((addr << 1) | 0);
         stopCondition();
         return ack;
     }
 
-    /// Write an array of bytes to a device (raw write, no register addressing).
-    /// Suitable for sending multi-byte commands to I2C slave devices.
-    bool writeBytes(uint8_t addr, const uint8_t *data, size_t len) {
+    bool _writeBytesOnce(uint8_t addr, const uint8_t *data, size_t len) {
         startCondition();
         if (!writeByte((addr << 1) | 0)) { stopCondition(); return false; }
         for (size_t i = 0; i < len; i++) {
@@ -91,9 +141,7 @@ public:
         return true;
     }
 
-    /// Read an array of bytes from a device (raw read, no register addressing).
-    /// The slave must have a response ready (e.g., prepared during a prior write).
-    bool readBytes(uint8_t addr, uint8_t *data, size_t len) {
+    bool _readBytesOnce(uint8_t addr, uint8_t *data, size_t len) {
         startCondition();
         if (!writeByte((addr << 1) | 1)) { stopCondition(); return false; }
         for (size_t i = 0; i < len; i++) {
@@ -103,12 +151,9 @@ public:
         return true;
     }
 
-private:
-    uint8_t _sda;
-    uint8_t _scl;
-
-    // Timing: ~5 µs half-period → ~100 kHz. Generous for reliability.
-    static constexpr uint8_t HALF_PERIOD_US = 5;
+    // ------------------------------------------------------------------------
+    // Bit-level primitives.
+    // ------------------------------------------------------------------------
 
     void sdaHigh() { pinMode(_sda, INPUT);  } // Release to pull-up
     void sdaLow()  { pinMode(_sda, OUTPUT); digitalWrite(_sda, LOW); }
