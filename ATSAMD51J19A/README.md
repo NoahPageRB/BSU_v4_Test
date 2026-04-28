@@ -94,16 +94,20 @@ enable motors) when the pins transition from input to output.
 driven HIGH to fire; default all OFF. The `sol <0..11>` CLI index walks in
 physical tray/valve order (T1V1..T3V4), not in expander pin order.
 
+Physical PCB routing has T1 and T2 swapped on GPB vs. the original pinout
+spec — T2 is on GPB0-3, T1 is on GPB4-7. The CLI index abstracts this so
+`sol 0..3` always means T1V1..T1V4 regardless.
+
 | Pin    | Direction | Signal        | CLI    |
 |--------|-----------|---------------|--------|
-| GPB0   | **Out**   | T1V1          | sol 0  |
-| GPB1   | **Out**   | T1V2          | sol 1  |
-| GPB2   | **Out**   | T1V3          | sol 2  |
-| GPB3   | **Out**   | T1V4          | sol 3  |
-| GPB4   | **Out**   | T2V1          | sol 4  |
-| GPB5   | **Out**   | T2V2          | sol 5  |
-| GPB6   | **Out**   | T2V3          | sol 6  |
-| GPB7   | **Out**   | T2V4          | sol 7  |
+| GPB0   | **Out**   | T2V1          | sol 4  |
+| GPB1   | **Out**   | T2V2          | sol 5  |
+| GPB2   | **Out**   | T2V3          | sol 6  |
+| GPB3   | **Out**   | T2V4          | sol 7  |
+| GPB4   | **Out**   | T1V1          | sol 0  |
+| GPB5   | **Out**   | T1V2          | sol 1  |
+| GPB6   | **Out**   | T1V3          | sol 2  |
+| GPB7   | **Out**   | T1V4          | sol 3  |
 | GPA0   | **Out**   | T3V1          | sol 8  |
 | GPA1   | **Out**   | T3V2          | sol 9  |
 | GPA2   | **Out**   | T3V3          | sol 10 |

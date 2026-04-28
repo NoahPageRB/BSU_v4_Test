@@ -187,16 +187,18 @@ static constexpr uint8_t EXTRA_OLATA_SAFE =
 
 // --- TRAY_IO_EXPANDER (0x20) bit layout ---
 // 12 solenoid outputs, organized by tray (3 trays × 4 valves each).
-//   GPB0 = T1V1   GPB4 = T2V1   GPA0 = T3V1
-//   GPB1 = T1V2   GPB5 = T2V2   GPA1 = T3V2
-//   GPB2 = T1V3   GPB6 = T2V3   GPA2 = T3V3
-//   GPB3 = T1V4   GPB7 = T2V4   GPA3 = T3V4
+// Physical PCB routing (verified empirically — earlier spec had T1/T2 swapped
+// on GPB):
+//   GPB0 = T2V1   GPB4 = T1V1   GPA0 = T3V1
+//   GPB1 = T2V2   GPB5 = T1V2   GPA1 = T3V2
+//   GPB2 = T2V3   GPB6 = T1V3   GPA2 = T3V3
+//   GPB3 = T2V4   GPB7 = T1V4   GPA3 = T3V4
 //   GPA4..GPA7 = nc (no connection)
 //
 // CLI index (`sol N`) is physical tray/valve order so testing walks
 // T1V1, T1V2, ... T3V4 naturally:
-//   sol 0..3  -> T1V1..T1V4 (GPB0..GPB3)
-//   sol 4..7  -> T2V1..T2V4 (GPB4..GPB7)
+//   sol 0..3  -> T1V1..T1V4 (GPB4..GPB7)
+//   sol 4..7  -> T2V1..T2V4 (GPB0..GPB3)
 //   sol 8..11 -> T3V1..T3V4 (GPA0..GPA3)
 static constexpr uint8_t TRAY_IODIRA = 0xF0; // GPA0..GPA3 outputs (T3V1..T3V4), GPA4..GPA7 inputs (nc)
 static constexpr uint8_t TRAY_IODIRB = 0x00; // GPB all outputs (T1V1..T2V4)
@@ -212,12 +214,29 @@ static constexpr uint8_t NUM_SOLENOIDS = 12;
 // LED MCU I2C Protocol Constants
 // ============================================================================
 
+// ============================================================================
+// Firmware Version
+// ============================================================================
+//
+// IMPORTANT: bump these on every change. Major = breaking, Minor = feature,
+// Patch = bug fix. See CLAUDE.md at the repo root.
+#define BSU_FW_VERSION_MAJOR 1
+#define BSU_FW_VERSION_MINOR 0
+#define BSU_FW_VERSION_PATCH 0
+#define _BSU_VER_STR(x) #x
+#define _BSU_VER_XSTR(x) _BSU_VER_STR(x)
+#define BSU_FW_VERSION_STR  \
+    _BSU_VER_XSTR(BSU_FW_VERSION_MAJOR) "." \
+    _BSU_VER_XSTR(BSU_FW_VERSION_MINOR) "." \
+    _BSU_VER_XSTR(BSU_FW_VERSION_PATCH)
+
 static constexpr uint8_t LED_MCU_ADDR       = 0x30;
 // Commands (master writes)
-static constexpr uint8_t LED_CMD_SET_ANIM   = 0x01;
-static constexpr uint8_t LED_CMD_GET_STATUS = 0x02;
-static constexpr uint8_t LED_CMD_SET_CONFIG = 0x03;
-static constexpr uint8_t LED_CMD_GET_CONFIG = 0x04;
+static constexpr uint8_t LED_CMD_SET_ANIM    = 0x01;
+static constexpr uint8_t LED_CMD_GET_STATUS  = 0x02;
+static constexpr uint8_t LED_CMD_SET_CONFIG  = 0x03;
+static constexpr uint8_t LED_CMD_GET_CONFIG  = 0x04;
+static constexpr uint8_t LED_CMD_GET_VERSION = 0x05;
 // Response codes
 static constexpr uint8_t LED_RSP_OK         = 0xA0;
 static constexpr uint8_t LED_RSP_BAD_CMD    = 0xE1;
@@ -349,6 +368,7 @@ static constexpr size_t MAX_TOKENS = 8;
 
 static void processCommand(char *line);
 static void cmdHelp();
+static void cmdVersion();
 static void cmdIoInit();
 static void cmdIoReset();
 static void cmdIoRead();
@@ -415,6 +435,7 @@ void setup() {
     Serial.println(F("============================================================"));
     Serial.println(F("  BSU v4 — Motor, Sensor, Drawer & Solenoid Test CLI"));
     Serial.println(F("  Board: Adafruit Metro M4 Express (ATSAMD51J19A)"));
+    Serial.println(F("  Firmware: v" BSU_FW_VERSION_STR));
     Serial.println(F("============================================================"));
 
     // Motor STEP pins (default LOW)
@@ -499,6 +520,7 @@ static void processCommand(char *line) {
     const char *cmd = tokens[0];
 
     if      (strcasecmp(cmd, "help") == 0)       { cmdHelp(); }
+    else if (strcasecmp(cmd, "version") == 0)    { cmdVersion(); }
     else if (strcasecmp(cmd, "io_init") == 0)    { cmdIoInit(); }
     else if (strcasecmp(cmd, "io_reset") == 0)   { cmdIoReset(); }
     else if (strcasecmp(cmd, "io_read") == 0)    { cmdIoRead(); }
@@ -667,6 +689,7 @@ static void cmdHelp() {
         "\n"
         "--- General ---\n"
         "  help                                  Show this help text\n"
+        "  version                               Print Main + LED MCU firmware versions\n"
         "\n"
         "--- I/O Expanders (MCP23017 @ 0x20 + 0x21) ---\n"
         "  io_init                               Initialize both MCP23017s\n"
@@ -747,6 +770,40 @@ static void cmdHelp() {
 }
 
 // ============================================================================
+// Command: version  (Main MCU + LED MCU firmware versions)
+// ============================================================================
+//
+// Prints both the Main MCU version (compiled-in) and the LED MCU version
+// (queried over I2C). The Python tester parses these and compares against its
+// expected versions to catch firmware/test-suite drift.
+static void cmdVersion() {
+    Serial.print(F("[VERSION] BSU Main MCU firmware: v"));
+    Serial.println(F(BSU_FW_VERSION_STR));
+
+    uint8_t cmd = LED_CMD_GET_VERSION;
+    if (!i2c.writeBytes(LED_MCU_ADDR, &cmd, 1)) {
+        Serial.println(F("[VERSION] LED MCU firmware: unavailable (I2C write failed)"));
+        return;
+    }
+    delay(5);
+
+    uint8_t rsp[4] = {0};
+    if (!i2c.readBytes(LED_MCU_ADDR, rsp, sizeof(rsp))) {
+        Serial.println(F("[VERSION] LED MCU firmware: unavailable (I2C read failed)"));
+        return;
+    }
+    if (rsp[0] != LED_RSP_OK) {
+        Serial.print(F("[VERSION] LED MCU firmware: unavailable (rsp=0x"));
+        Serial.print(rsp[0], HEX); Serial.println(F(")"));
+        return;
+    }
+    Serial.print(F("[VERSION] LED MCU firmware: v"));
+    Serial.print(rsp[1]); Serial.print('.');
+    Serial.print(rsp[2]); Serial.print('.');
+    Serial.println(rsp[3]);
+}
+
+// ============================================================================
 // Command: io_init  (both MCP23017s)
 // ============================================================================
 
@@ -816,8 +873,8 @@ static bool initTrayExpander() {
 
     ioExpanderTrayInit = true;
     Serial.println(F("[IO] TRAY_IO_EXPANDER (0x20) initialized."));
-    Serial.println(F("[IO]   GPB0-GPB3: T1V1-T1V4 (sol 0-3)  (outputs, LOW=off)"));
-    Serial.println(F("[IO]   GPB4-GPB7: T2V1-T2V4 (sol 4-7)  (outputs, LOW=off)"));
+    Serial.println(F("[IO]   GPB0-GPB3: T2V1-T2V4 (sol 4-7)  (outputs, LOW=off)"));
+    Serial.println(F("[IO]   GPB4-GPB7: T1V1-T1V4 (sol 0-3)  (outputs, LOW=off)"));
     Serial.println(F("[IO]   GPA0-GPA3: T3V1-T3V4 (sol 8-11) (outputs, LOW=off)"));
     Serial.println(F("[IO]   GPA4-GPA7: nc (inputs)"));
     return true;
@@ -913,8 +970,18 @@ static void cmdIoRead() {
             Serial.print(F(", GPIOB=0x")); Serial.println(gpioB, HEX);
             Serial.print(F("[IO]   Solenoid readback: "));
             for (uint8_t i = 0; i < NUM_SOLENOIDS; i++) {
-                // sol 0..7 -> GPB bit i; sol 8..11 -> GPA bit (i-8).
-                uint8_t bitSet = (i < 8) ? ((gpioB >> i) & 1) : ((gpioA >> (i - 8)) & 1);
+                // CLI index -> GPIO bit (matches cmdSolenoid mapping):
+                //   sol 0..3  (T1) -> GPB4..GPB7
+                //   sol 4..7  (T2) -> GPB0..GPB3
+                //   sol 8..11 (T3) -> GPA0..GPA3
+                uint8_t bitSet;
+                if (i < 4) {
+                    bitSet = (gpioB >> (i + 4)) & 1;
+                } else if (i < 8) {
+                    bitSet = (gpioB >> (i - 4)) & 1;
+                } else {
+                    bitSet = (gpioA >> (i - 8)) & 1;
+                }
                 if (i > 0) Serial.print(F(","));
                 char lbl[5]; solLabel(i, lbl);
                 Serial.print(lbl);
@@ -1903,14 +1970,27 @@ static void cmdSolenoid(const char *indexStr, const char *state) {
     else if (strcasecmp(state, "off") == 0) turnOn = false;
     else { Serial.println(F("[ERROR] State must be 'on' or 'off'.")); return; }
 
-    // sol 0..7  -> GPB bit idx         (T1V1..T2V4)
-    // sol 8..11 -> GPA bit (idx - 8)   (T3V1..T3V4)
-    if (idx < 8) {
-        uint8_t mask = (uint8_t)(1 << idx);
-        trayOlatB = turnOn ? (trayOlatB | mask) : (trayOlatB & (uint8_t)~mask);
-    } else {
-        uint8_t mask = (uint8_t)(1 << (idx - 8));
+    // CLI index -> GPIO bit (per empirical PCB routing):
+    //   sol 0..3  (T1V1..T1V4) -> GPB4..GPB7
+    //   sol 4..7  (T2V1..T2V4) -> GPB0..GPB3
+    //   sol 8..11 (T3V1..T3V4) -> GPA0..GPA3
+    uint8_t bit;
+    bool onPortA;
+    if (idx < 4) {                  // T1: GPB4..GPB7
+        bit = (uint8_t)(idx + 4);
+        onPortA = false;
+    } else if (idx < 8) {           // T2: GPB0..GPB3
+        bit = (uint8_t)(idx - 4);
+        onPortA = false;
+    } else {                        // T3: GPA0..GPA3
+        bit = (uint8_t)(idx - 8);
+        onPortA = true;
+    }
+    uint8_t mask = (uint8_t)(1 << bit);
+    if (onPortA) {
         trayOlatA = turnOn ? (trayOlatA | mask) : (trayOlatA & (uint8_t)~mask);
+    } else {
+        trayOlatB = turnOn ? (trayOlatB | mask) : (trayOlatB & (uint8_t)~mask);
     }
 
     if (!writeTrayOlat()) {

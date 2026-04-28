@@ -17,6 +17,7 @@ Requirements:
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -27,6 +28,20 @@ import serial.tools.list_ports
 # =============================================================================
 # Constants
 # =============================================================================
+
+# =============================================================================
+# Versions
+# =============================================================================
+#
+# IMPORTANT: bump these on every change. Major = breaking, Minor = feature,
+# Patch = bug fix. See CLAUDE.md at the repo root.
+#
+# Any change to either MCU's firmware MUST come with a Python change here:
+# bump the matching EXPECTED_*_FW_VERSION to the new firmware version, AND
+# bump TEST_SUITE_VERSION because the Python file just changed.
+TEST_SUITE_VERSION       = "1.0.0"
+EXPECTED_MAIN_FW_VERSION = "1.0.0"
+EXPECTED_LED_FW_VERSION  = "1.0.0"
 
 BAUD_RATE = 115200
 DEFAULT_TIMEOUT = 2.0
@@ -259,6 +274,13 @@ class TestLog:
         skip_count = sum(1 for r in self.results if r["status"] == "SKIP")
         log_data = {
             "timestamp": datetime.now().isoformat(),
+            "versions": {
+                "test_suite":       TEST_SUITE_VERSION,
+                "main_fw_expected": EXPECTED_MAIN_FW_VERSION,
+                "led_fw_expected":  EXPECTED_LED_FW_VERSION,
+                "main_fw_reported": _detected_main_fw_version,
+                "led_fw_reported":  _detected_led_fw_version,
+            },
             "overall": "FAIL" if fail_count > 0 else "PASS",
             "summary": {
                 "total": len(self.results),
@@ -276,6 +298,12 @@ class TestLog:
 
 
 _log: TestLog = None
+
+# Populated during the BASIC_COMMS section's version-check step. Stays None
+# until that step runs, in which case the JSON shows null for "reported"
+# fields — useful when the comms test fails before version can be parsed.
+_detected_main_fw_version: str = None
+_detected_led_fw_version:  str = None
 
 
 def expect_ok(lines, keyword=None):
@@ -349,17 +377,78 @@ def cleanup(sp):
 # Section 1: Basic Communications Test
 # =============================================================================
 
+_VERSION_RE_MAIN = re.compile(r"BSU Main MCU firmware:\s*v?([\d]+\.[\d]+\.[\d]+)")
+_VERSION_RE_LED  = re.compile(r"LED MCU firmware:\s*v?([\d]+\.[\d]+\.[\d]+)")
+
+
+def _parse_version_response(lines, regex):
+    for ln in lines:
+        m = regex.search(ln)
+        if m:
+            return m.group(1)
+    return None
+
+
 def test_basic_comms(sp):
+    global _detected_main_fw_version, _detected_led_fw_version
+
     print_header("Section 1: Basic Communications Test")
     print_info("Sending 'help' command to verify MCU is responding...")
 
     lines = sp.send_command("help", timeout=3.0)
     ok = expect_ok(lines, keyword="tmc_init")
-
     if not check_and_log("BASIC_COMMS", "help_response", ok, lines):
         return False
-
     print_info("MCU is communicating. CLI help received successfully.")
+
+    # ---- Firmware version check ----
+    print_info(
+        f"Verifying firmware versions (Main expected v{EXPECTED_MAIN_FW_VERSION}, "
+        f"LED expected v{EXPECTED_LED_FW_VERSION}, suite v{TEST_SUITE_VERSION})..."
+    )
+    lines = sp.send_command("version", timeout=3.0)
+
+    main_v = _parse_version_response(lines, _VERSION_RE_MAIN)
+    _detected_main_fw_version = main_v
+    main_ok = (main_v == EXPECTED_MAIN_FW_VERSION)
+    if main_v is None:
+        print_fail("Main MCU firmware version not found in response.")
+    elif not main_ok:
+        print_fail(
+            f"Main MCU firmware mismatch: expected v{EXPECTED_MAIN_FW_VERSION}, "
+            f"got v{main_v}. Bump EXPECTED_MAIN_FW_VERSION (and TEST_SUITE_VERSION) "
+            "or reflash the MCU."
+        )
+    if not check_and_log(
+        "BASIC_COMMS",
+        f"main_fw_version_v{EXPECTED_MAIN_FW_VERSION}",
+        main_ok,
+        lines if main_v is None else [f"reported v{main_v}"],
+    ):
+        return False
+
+    led_v = _parse_version_response(lines, _VERSION_RE_LED)
+    _detected_led_fw_version = led_v
+    led_ok = (led_v == EXPECTED_LED_FW_VERSION)
+    if led_v is None:
+        print_fail("LED MCU firmware version not found in response (LED MCU may be unflashed or unreachable on I2C).")
+    elif not led_ok:
+        print_fail(
+            f"LED MCU firmware mismatch: expected v{EXPECTED_LED_FW_VERSION}, "
+            f"got v{led_v}. Bump EXPECTED_LED_FW_VERSION (and TEST_SUITE_VERSION) "
+            "or reflash the LED MCU."
+        )
+    if not check_and_log(
+        "BASIC_COMMS",
+        f"led_fw_version_v{EXPECTED_LED_FW_VERSION}",
+        led_ok,
+        lines if led_v is None else [f"reported v{led_v}"],
+    ):
+        return False
+
+    print_pass(
+        f"Versions OK: Main v{main_v}, LED v{led_v}, suite v{TEST_SUITE_VERSION}"
+    )
     return True
 
 
@@ -575,6 +664,43 @@ def _mc_any_motor_active(mc_list, motor_prefixes):
     return any(active and motor in motor_prefixes for (motor, _side, active) in mc_list)
 
 
+SWITCH_SETTLE_S = 1.0  # Debounce window after first detect before mc_switches
+
+
+def _wait_for_stable_trigger(sp, sw_name, settle_s=SWITCH_SETTLE_S):
+    """
+    Poll io_read until `sw_name` reads TRIGGERED, then wait `settle_s` and
+    re-check. If the switch is still TRIGGERED, return — caller can run
+    mc_switches with confidence the jumper is settled. If it returned to
+    open during the settle window, the user pulled too fast; loop back to
+    polling instead of running mc_switches mid-jiggle.
+    """
+    while True:
+        # Phase 1: poll until first TRIGGERED edge.
+        while True:
+            lines = sp.send_command("io_read")
+            states = _parse_io_read_switches(lines)
+            if states.get(sw_name) == "TRIGGERED":
+                break
+            time.sleep(POLL_INTERVAL)
+
+        print_info(
+            f"{sw_name} TRIGGERED — hold the jumper steady for {settle_s:.1f}s..."
+        )
+        time.sleep(settle_s)
+
+        # Phase 2: confirm still triggered after settle.
+        lines = sp.send_command("io_read")
+        states = _parse_io_read_switches(lines)
+        if states.get(sw_name) == "TRIGGERED":
+            return
+
+        print_warn(
+            f"{sw_name} returned to open during settle — jumper bounced. "
+            "Re-polling; press and hold the jumper steady."
+        )
+
+
 def test_limit_switches(sp):
     print_header("Section 4: Limit Switch Test")
     print_info("Disconnect the test motor from all headers before proceeding.")
@@ -618,15 +744,13 @@ def test_limit_switches(sp):
         )
         print_info("Polling every 0.25s; take your time — no timeout.")
 
-        # Wait for TRIGGERED (no timeout — wait as long as the user needs)
-        while True:
-            lines = sp.send_command("io_read")
-            states = _parse_io_read_switches(lines)
-            if states.get(sw_name) == "TRIGGERED":
-                break
-            time.sleep(POLL_INTERVAL)
+        # Debounce the user's jumper press: poll for TRIGGERED, then wait 1s
+        # and re-check that the switch is still TRIGGERED. If it flipped back
+        # to open during the settle window, the user pulled the jumper too
+        # fast — go back to polling instead of running mc_switches mid-jiggle.
+        _wait_for_stable_trigger(sp, sw_name)
 
-        print_pass(f"{sw_name} detected TRIGGERED in io_read")
+        print_pass(f"{sw_name} held TRIGGERED through 1s settle — confirming with mc_switches")
 
         # Verify the TMC429 also sees at least one of the expected motor(s) as
         # ACTIVE on some side.
